@@ -183,7 +183,7 @@ class TestOutputs(unittest.TestCase):
 
     def test_cleanup_old_by_max_files(self):
         d = ROOT / 'outputs' / '_cleanup'
-        d.mkdir(exist_ok=True)
+        d.mkdir(parents=True, exist_ok=True)      # 干净克隆里 outputs/ 还不存在，必须带 parents
         for i in range(5):
             write_json(d / f'f{i}.json', {'i': i})
         removed = cleanup_old(d, max_files=2, patterns=('*.json',))
