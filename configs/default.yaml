@@ -1,0 +1,67 @@
+# 复制一份改改即可，例如 configs/production.yaml，然后 --config configs/production.yaml
+model:
+  weights: yolo11n.pt      # 也可写 best.pt / best.onnx / best.engine，自动在 weights/ 下找
+  imgsz: 640               # 320 更快、1280 更准
+  conf: 0.25
+  iou: 0.45
+  device: null             # null=自动, cpu, 0, 0,1
+  half: false              # FP16，仅 CUDA
+  augment: false           # TTA 测试时增强：更准但约 2 倍耗时
+  classes: []              # 例: [0] 只检测人; [person, bus] 也支持
+
+track:
+  enable: false            # true = ByteTrack，输出 track_id 与唯一目标数
+  tracker: bytetrack.yaml  # 也可选 botsort.yaml
+
+run:
+  stride: 1                # 跳帧，2 = 每两帧推理一次
+  max_frames: 0            # 0 = 全部
+  reconnect: 3             # 摄像头/RTSP 掉线重连次数
+  retry_delay: 1.0         # 重连间隔秒
+  show: false              # 实时预览窗口
+  workers: 1               # 目录批量时的并行进程数
+
+camera:
+  index: 0                 # 摄像头编号
+  width: 1280
+  height: 720
+  fps: 30
+  show: true               # camera 子命令默认弹实时窗口
+  record: false            # 是否保存录像
+
+analytics:
+  roi: []                  # ROI 多边形，如 [[100,100],[500,100],[500,400],[100,400]]，只统计区域内目标
+  line: []                 # 越线计数线，如 [[0,300],[640,300]]（需配合 --track）
+  classes: []              # 参与越线计数的类别；空 = 全部
+
+alert:
+  webhook: ''              # 企业微信/飞书机器人 key，或任意接收 JSON 的 URL
+  type: generic            # generic | wecom | feishu
+  timeout: 5
+
+output:
+  dir: outputs             # 结果目录
+  video: true              # 写结果视频（H.264 优先）
+  name: ''                 # 空 = 按源自动命名
+  json: true               # 写统计 JSON
+  segment_seconds: 0       # >0 按秒数切分录像（长时录制用）
+  keep_days: 0             # >0 自动清理超过 N 天的输出
+  max_files: 0             # >0 只保留最近 N 个输出文件
+  events:                  # 告警抓拍
+    enable: true
+    classes: [0]           # 触发抓拍的类别（默认人）
+    min_conf: 0.6
+    cooldown_s: 2.0        # 同一告警冷却时间
+
+serve:                     # Web 面板
+  host: 127.0.0.1
+  port: 8000
+  source: '0'              # 视频文件 / 目录 / RTSP / 摄像头编号
+  quality: 80              # MJPEG 质量
+
+metrics:
+  file: ''                 # 非空则把 Prometheus 指标同时写到该文件
+
+log:
+  level: INFO
+  interval: 30             # 每多少帧打一条进度日志

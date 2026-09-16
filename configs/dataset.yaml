@@ -1,0 +1,11 @@
+# 自有数据集模板：复制到 datasets/mydata/data.yaml 后改路径
+# 目录约定（YOLO 格式）：
+#   datasets/mydata/images/{train,val}/*.jpg
+#   datasets/mydata/labels/{train,val}/*.txt   # 每行: class_id cx cy w h（归一化 0-1）
+path: datasets/mydata
+train: images/train
+val: images/val
+names:
+  0: person
+  1: helmet
+# 2: vest

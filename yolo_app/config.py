@@ -1,0 +1,72 @@
+"""配置：内置默认值 ← YAML 文件 ← 命令行覆盖，三层合并。
+
+为什么要有 DEFAULTS：保证任何字段都有值，业务代码里可以放心 cfg['x']['y']，
+不用到处写 .get() 兜底；YAML 与命令行只是"覆盖其中的一部分"。
+
+用法：
+    cfg = load_config('configs/production.yaml', {'model': {'conf': 0.5}})
+
+分层优先级（后者覆盖前者）：DEFAULTS → YAML → overrides
+所有模块都只接收这个 dict，不读全局变量，方便测试与多环境部署。
+"""
+import copy
+from pathlib import Path
+
+import yaml
+
+DEFAULTS = {
+    'model': {
+        'weights': 'yolo11n.pt',
+        'imgsz': 640,
+        'conf': 0.25,
+        'iou': 0.45,
+        'device': None,        # None=自动, 'cpu', '0', '0,1'
+        'half': False,         # FP16，仅 CUDA
+        'augment': False,      # TTA 测试时增强：更准但约 2 倍耗时
+        'classes': [],         # 类别 id 或名称；空 = 全部
+    },
+    'track': {'enable': False, 'tracker': 'bytetrack.yaml'},
+    'run': {'stride': 1, 'max_frames': 0, 'reconnect': 3, 'retry_delay': 1.0,
+            'show': False, 'workers': 1},
+    'camera': {'index': 0, 'width': 1280, 'height': 720, 'fps': 30, 'show': True, 'record': False},
+    'analytics': {
+        'roi': [],             # [[x,y],...] 多边形，只统计区域内目标；空 = 不过滤
+        'line': [],            # [[x1,y1],[x2,y2]] 越线，需配合 --track
+        'classes': [],         # 参与越线计数的类别；空 = 全部
+    },
+    'alert': {'webhook': '', 'type': 'generic', 'timeout': 5},
+    'output': {
+        'dir': 'outputs',
+        'video': True,
+        'name': '',            # 空 = 按源自动命名
+        'json': True,
+        'segment_seconds': 0,  # >0 按时间切分录像；0 = 不分段
+        'keep_days': 0,        # >0 清理超过 N 天的输出
+        'max_files': 0,        # >0 只保留最近 N 个输出文件
+        'events': {'enable': True, 'classes': [0], 'min_conf': 0.6, 'cooldown_s': 2.0},
+    },
+    'serve': {'host': '127.0.0.1', 'port': 8000, 'source': '0', 'quality': 80},
+    'metrics': {'file': ''},   # 非空则把 Prometheus 指标同时写到该文件
+    'log': {'level': 'INFO', 'interval': 30, 'file': ''},   # file 非空则同时写日志文件
+}
+
+
+def deep_merge(base, patch):
+    """就地深度合并 patch 到 base，返回 base。"""
+    for k, v in (patch or {}).items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            deep_merge(base[k], v)
+        else:
+            base[k] = v
+    return base
+
+
+def load_config(path=None, overrides=None):
+    cfg = copy.deepcopy(DEFAULTS)
+    if path:
+        p = Path(path)
+        if not p.exists():
+            raise FileNotFoundError(f'配置文件不存在: {path}')
+        deep_merge(cfg, yaml.safe_load(p.read_text(encoding='utf-8')) or {})
+    deep_merge(cfg, {k: v for k, v in (overrides or {}).items() if v})
+    return cfg

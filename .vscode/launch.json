@@ -1,0 +1,72 @@
+{
+  // F5 默认跑"列表里的第一个配置"——这里放摄像头实时检测；要跑别的用左侧 Run and Debug 下拉切换
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "YOLO: 摄像头实时检测（只看不录）",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "yolo_app",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "env": { "YOLO_OFFLINE": "true" },
+      "args": ["camera", "--index", "0"]
+    },
+    {
+      "name": "YOLO: 摄像头录制（不弹窗）",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "yolo_app",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "env": { "YOLO_OFFLINE": "true" },
+      "args": ["camera", "--record", "--no-show", "--max-frames", "300"]
+    },
+    {
+      "name": "YOLO: 检测视频 (跟踪)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "yolo_app",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "env": { "YOLO_OFFLINE": "true" },
+      "args": ["run", "--source", "data/test.mp4", "--track", "--show"]
+    },
+    {
+      "name": "YOLO: ROI + 越线计数 + 告警",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "yolo_app",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "env": { "YOLO_OFFLINE": "true" },
+      "args": ["run", "--source", "data/test.mp4", "--track", "--roi", "60,60 620,60 620,460 60,460", "--line", "120,0,120,480", "--count-classes", "person"]
+    },
+    {
+      "name": "YOLO: 启动 Web 面板",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "yolo_app",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "env": { "YOLO_OFFLINE": "true" },
+      "args": ["serve", "--source", "0", "--port", "8000"]
+    },
+    {
+      "name": "YOLO: 环境自检 (check)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "yolo_app",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "env": { "YOLO_OFFLINE": "true" },
+      "args": ["check"]
+    }
+  ]
+}

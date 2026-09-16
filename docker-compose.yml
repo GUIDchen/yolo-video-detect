@@ -1,0 +1,17 @@
+services:
+  yolo:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./configs:/app/configs:ro
+      - ./weights:/app/weights
+      - ./data:/app/data
+      - ./outputs:/app/outputs
+    environment:
+      YOLO_OFFLINE: "true"
+    # 覆盖检测源：RTSP 流 / 目录 / 摄像头编号（Linux 需 --device /dev/video0:0）
+    command: ["serve", "--source", "rtsp://user:pwd@192.168.1.10:554/stream1", "--host", "0.0.0.0"]
+    restart: unless-stopped
+    # Linux 挂摄像头：
+    # devices: ["/dev/video0:/dev/video0"]

@@ -1,0 +1,9 @@
+.venv
+outputs
+data/*.mp4
+*.pyc
+__pycache__
+.git
+.vscode
+*.jpg
+*.png

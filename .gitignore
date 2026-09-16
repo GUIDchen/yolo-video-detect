@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# 产物
+outputs/
+runs/
+datasets/
+
+# 测试素材（用脚本重新生成即可，避免把第三方素材与视频提交进仓库）
+data/*.mp4
+data/*.jpg
+data/*.png
+
+# 权重（体积大，用 scripts/get_weights.sh 或训练得到）
+weights/*.pt
+weights/*.onnx
+weights/*.engine
+weights/*.xml
+weights/*.bin
+
+# 运行环境与工具缓存
+.ultralytics/
+.ruff_cache/
+.pytest_cache/
+*.log
+
+# 系统
+.DS_Store

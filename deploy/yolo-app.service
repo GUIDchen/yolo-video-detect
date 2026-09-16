@@ -1,0 +1,24 @@
+# systemd 常驻服务模板：sudo cp deploy/yolo-app.service /etc/systemd/system/ && sudo systemctl enable --now yolo-app
+# 适用于服务器跑 Web 面板 + Prometheus 指标；路径与用户按实际修改。
+[Unit]
+Description=YOLO 视频目标检测服务
+After=network-online.target
+
+[Service]
+Type=simple
+User=yolo
+WorkingDirectory=/opt/yolo-video-detect
+Environment=YOLO_OFFLINE=true
+Environment=PYTHONUNBUFFERED=1
+# RTSP / 摄像头 / 目录均可；容器内没有摄像头，服务器上一般用 RTSP
+ExecStart=/opt/yolo-video-detect/.venv/bin/python -m yolo_app serve \
+    --source rtsp://user:pwd@192.168.1.10:554/stream1 \
+    --host 0.0.0.0 --port 8000 \
+    --config configs/production.yaml
+Restart=always
+RestartSec=5
+# 只给必要的写权限：输出目录
+ReadWritePaths=/opt/yolo-video-detect/outputs
+
+[Install]
+WantedBy=multi-user.target

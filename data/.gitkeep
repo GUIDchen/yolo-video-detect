@@ -1,0 +1,3 @@
+# 测试素材不入库（约 700KB，且来自 ultralytics 资产）：
+#   bash scripts/get_weights.sh                     # 下载 bus.jpg 与权重
+#   python scripts/make_test_video.py --image data/bus.jpg --out data/test.mp4

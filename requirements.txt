@@ -1,0 +1,13 @@
+ultralytics>=8.3.0
+pyyaml>=6.0
+lap>=0.5.12          # ByteTrack 跟踪依赖（--track 必需）
+opencv-python>=4.9.0
+fastapi>=0.110       # Web 面板（serve 子命令）
+uvicorn[standard]>=0.29   # [standard] 带 websockets，否则 /ws 会 404
+
+# 导出 ONNX 时再装（TensorRT 导出需 NVIDIA GPU 环境）
+# onnx>=1.16
+# onnxslim>=0.1.34
+
+# GPU 加速（可选）：先按 PyTorch 官网命令装 CUDA 版 torch，再装 ultralytics
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
