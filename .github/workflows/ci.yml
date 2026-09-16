@@ -18,10 +18,11 @@ jobs:
         run: |
           pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
           pip install -r requirements.txt ruff
-      - name: 拉取权重（CI 上 GitHub 可达）
+      - name: 拉取权重与样例图（CI 上 GitHub 可达）
         run: |
-          mkdir -p weights
+          mkdir -p weights data
           curl -fL -o weights/yolo11n.pt https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n.pt
+          curl -fL -o data/bus.jpg https://raw.githubusercontent.com/ultralytics/ultralytics/main/ultralytics/assets/bus.jpg
       - name: 代码检查
         run: ruff check yolo_app tests scripts
       - name: 自检

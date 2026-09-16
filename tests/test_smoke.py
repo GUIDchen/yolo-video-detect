@@ -20,6 +20,35 @@ from yolo_app.sources import is_camera, list_videos
 
 ROOT = Path(__file__).resolve().parent.parent
 
+# 测试素材是否来自真实照片（bus.jpg）——决定要不要断言"确实检出了人"
+REAL_FIXTURE = False
+
+
+def ensure_test_video():
+    """确保 data/test.mp4 存在：有 bus.jpg 就生成真实场景视频，否则合成一段。
+
+    这样 `git clone` 后的干净仓库也能直接跑测试（素材不入库，见 .gitignore）。
+    """
+    global REAL_FIXTURE
+    video = ROOT / 'data' / 'test.mp4'
+    if video.exists():
+        REAL_FIXTURE = (ROOT / 'data' / 'bus.jpg').exists()
+        return video
+    (ROOT / 'data').mkdir(exist_ok=True)
+    cmd = [sys.executable, str(ROOT / 'scripts' / 'make_test_video.py'),
+           '--out', str(video), '--seconds', '1', '--width', '320', '--height', '240']
+    if (ROOT / 'data' / 'bus.jpg').exists():
+        cmd += ['--image', str(ROOT / 'data' / 'bus.jpg')]
+        REAL_FIXTURE = True
+    import subprocess
+    subprocess.run(cmd, check=True, cwd=str(ROOT), capture_output=True)   # 静默生成，别污染测试输出
+    return video
+
+
+def setUpModule():
+    """整个测试模块开始前准备素材（缺就现造）。"""
+    ensure_test_video()
+
 
 class FakeBoxes:
     """支持索引的最小 boxes 替身，用于不加载模型就测后处理。"""
@@ -63,6 +92,7 @@ class TestSources(unittest.TestCase):
         self.assertFalse(is_camera('data/test.mp4'))
 
     def test_list_videos(self):
+        ensure_test_video()                      # 干净仓库里素材是现造的
         vids = list_videos('data')
         self.assertTrue(any(v.endswith('.mp4') for v in vids))
         self.assertEqual(list_videos('data/test.mp4'), ['data/test.mp4'])
@@ -195,17 +225,21 @@ class TestPipelineEndToEnd(unittest.TestCase):
 
     def test_detect_video(self):
         if not (ROOT / 'weights' / 'yolo11n.pt').exists():
-            self.skipTest('缺少 weights/yolo11n.pt')
+            self.skipTest('缺少 weights/yolo11n.pt（bash scripts/get_weights.sh 可拉取）')
         from yolo_app.detector import Detector
         from yolo_app.logging_setup import get_logger
         from yolo_app.pipeline import process
 
         cfg = load_config(None, {'run': {'max_frames': 3}, 'output': {'name': '_smoke_e2e.mp4', 'json': False}})
         det = Detector(cfg)
-        summary = process('data/test.mp4', cfg, det, get_logger('WARNING'))
+        summary = process(str(ensure_test_video()), cfg, det, get_logger('WARNING'))
+        # 无论素材真伪都必须成立的"管道机制"：帧数、产物、统计字段
         self.assertEqual(summary['frames_inferred'], 3)
         self.assertTrue(Path(summary['output_video']).exists())
-        self.assertGreater(summary['per_class_frames'].get('person', 0), 0)
+        self.assertIn('per_class_frames', summary)
+        self.assertIn('unique_tracks', summary)
+        if REAL_FIXTURE:      # 只有真实场景素材才断言"检出人"（合成图形没有目标）
+            self.assertGreater(summary['per_class_frames'].get('person', 0), 0)
         Path(summary['output_video']).unlink()
 
 
