@@ -120,6 +120,24 @@ python -m yolo_app serve --source 0                               # Web 面板 h
 python -m yolo_app export --format onnx                           # 导出部署格式
 ```
 
+## 运行效果
+
+本机实测输出（Apple Silicon CPU，`ultralytics 8.4.152` / `torch 2.14.0`）：
+
+```console
+$ python -m yolo_app check
+[INFO] 模型 weights/yolo11n.pt | 类别数 80 | 设备 cpu | 跟踪 False | 类别过滤 全部
+[INFO] 自检通过 ✅
+
+$ python -m yolo_app run --source data/test.mp4 --track --max-frames 5 --out-dir /tmp/out
+[INFO] 开始处理 data/test.mp4 | 640x480 @25fps | 设备 cpu | 跟踪 bytetrack.yaml
+[INFO] 完成 data/test.mp4 | 推理 5 帧 | 4.9 FPS | 唯一目标 4 | 越线 in 0/out 0 | 事件 1 | 输出 /tmp/out/test.mp4
+```
+
+- `唯一目标` 依赖跟踪 ID 去重，**未开启 `--track` 时不计入**，要让这个数字有意义请加 `--track`。
+- FPS 随硬件、`--imgsz`、是否跟踪而变；多模型横向对照见下文「切换其他 YOLO 模型」的实测表。
+- 输出视频、抓拍与 JSON 落在 `--out-dir`（默认 `outputs/`），该目录不入库。
+
 ## 命令行参考
 
 ### 子命令
@@ -405,6 +423,10 @@ FastAPI + WebSocket 面板、Docker（headless）、录像分段留存、Prometh
 ## 变更记录
 
 见 [CHANGELOG.md](CHANGELOG.md)。
+
+## 相关项目
+
+- [photography-ai-playbook](https://github.com/GUIDchen/photography-ai-playbook)：摄影作品资产化的 AI 落地手册——模型选型、量化与部署，以及 11 个方向的技术路线、验收标准与许可证核验。
 
 ## 许可证
 
