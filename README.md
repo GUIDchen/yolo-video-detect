@@ -2,6 +2,12 @@
 
 基于 **Ultralytics YOLO11 + OpenCV** 的可落地工程：同一条链路支持**本地视频、目录批量、RTSP 流、摄像头**，内置跟踪、ROI、越线计数、告警抓拍、Web 面板与 Prometheus 指标，可 Docker 部署、可自有数据微调。
 
+[![CI](https://github.com/GUIDchen/yolo-video-detect/actions/workflows/ci.yml/badge.svg)](https://github.com/GUIDchen/yolo-video-detect/actions/workflows/ci.yml)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
+
+> 一个可以照抄的工程骨架：不只演示"怎么检测"，而是把断流重连、越线计数、告警、指标、分段留存、Docker 部署与 CI 都接通。
+
 ## 能力清单
 
 | 能力 | 入口 |
@@ -20,6 +26,24 @@
 | Docker 部署（headless） | `docker compose up -d` |
 | 自有数据微调 | `python scripts/train.py --data ...` |
 | CI | `.github/workflows/ci.yml` |
+
+## 流水线架构
+
+```mermaid
+flowchart LR
+    S["视频源<br/>文件 · 目录 · RTSP · 摄像头"] --> R["读帧<br/>sources.py<br/>断流重连"]
+    R --> D["推理 / 跟踪<br/>detector.py<br/>YOLO + ByteTrack"]
+    D --> A["ROI 过滤<br/>analytics.py"]
+    A --> C["越线计数<br/>analytics.py"]
+    C --> W["绘制 + 落盘<br/>pipeline.py · outputs.py"]
+    C --> M["指标<br/>metrics.py"]
+    C --> L["告警<br/>alerts.py"]
+    W --> O["H.264 录像<br/>分段 · 留存清理"]
+    M --> P["Web 面板 + Prometheus<br/>webapp.py"]
+    L --> H["企业微信 / 飞书 / webhook"]
+```
+
+扩展原则：加输入改 `sources.py`，加后处理改 `analytics.py` + pipeline 里一行，加输出改 `outputs.py`，加接口改 `webapp.py`——不在主循环里堆业务分支。
 
 ## 目录结构
 
@@ -381,3 +405,17 @@ FastAPI + WebSocket 面板、Docker（headless）、录像分段留存、Prometh
 ## 变更记录
 
 见 [CHANGELOG.md](CHANGELOG.md)。
+
+## 许可证
+
+本项目以 **GNU AGPL-3.0** 发布，全文见 [LICENSE](LICENSE)。
+
+**为什么是 AGPL 而不是 MIT**：本项目依赖 [Ultralytics](https://github.com/ultralytics/ultralytics)（AGPL-3.0）。AGPL 具有传染性——分发基于它的组合作品时，整体必须以 AGPL 提供源代码。若你需要闭源商用，正确做法是向 Ultralytics 购买商业许可，而不是替换本项目的 LICENSE。
+
+使用前请确认三件事：
+
+1. **网络服务也算分发**：通过 Web 面板对外提供服务时，需按 AGPL 向使用者提供源码。
+2. **权重同样受限**：官方预训练权重由 Ultralytics 发布，受 AGPL-3.0 约束；本仓库不包含任何权重。
+3. **微调权重是衍生作品**：自行训练的权重分发时同样受 AGPL 约束。
+
+第三方组件清单、权重与素材说明见 [NOTICE.md](NOTICE.md)。
