@@ -53,8 +53,10 @@ def process(source, cfg, detector, logger, show=None, record=None, on_stats=None
     record = cfg['output']['video'] if record is None else record
 
     # 1) 打开视频源：摄像头/RTSP 失败时给出可操作的排查提示（权限是最常见原因）
-    src = VideoSource(source, cfg['camera'], run_cfg['reconnect'], run_cfg['retry_delay'])
-    if not src.cap.isOpened():
+    src = VideoSource(source, cfg['camera'], run_cfg['reconnect'], run_cfg['retry_delay'],
+                      reader=run_cfg.get('reader', 'auto'),
+                      read_timeout=run_cfg.get('read_timeout', 10), logger=logger)
+    if not src.opened:
         hint = ''
         if not is_camera(source) and not Path(str(source)).exists():
             hint = ('\n  · 文件/目录不存在：容器里跑要先把宿主机目录挂进来，'
@@ -84,6 +86,7 @@ def process(source, cfg, detector, logger, show=None, record=None, on_stats=None
                   'infer_ms_avg': round(infer_total / done, 2) if done else 0,
                   'infer_ms_max': round(infer_max, 2),
                   'skipped_stationary': skip_stationary, 'skipped_motion': skip_motion,
+                  'dropped': src.dropped,
                   'per_class': dict(hits), 'unique_tracks': len(ids),
                   'line': dict(line.total), 'events': len(events.events) if events else 0})
 
@@ -108,13 +111,13 @@ def process(source, cfg, detector, logger, show=None, record=None, on_stats=None
         alert = AlertChannel(al_cfg.get('webhook', ''), al_cfg.get('type', 'generic'),
                              al_cfg.get('timeout', 5), logger, dedupe_s=al_cfg.get('dedupe_s', 0))
 
-        logger.info(f'开始处理 {source} | {int(src.cap.get(cv2.CAP_PROP_FRAME_WIDTH))}x'
-                    f'{int(src.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))} @{src.fps:.0f}fps | 设备 {detector.device_name}'
+        logger.info(f'开始处理 {source} | {src.width}x{src.height} @{src.fps:.0f}fps | 设备 {detector.device_name}'
                     f'{" | 跟踪 " + cfg["track"]["tracker"] if detector.track else ""}'
                     f'{" | ROI" if roi.enabled else ""}{" | 越线计数" if line.enabled else ""}'
                     f'{" | 双阈值 " + str(conf.min_conf) if conf.enabled else ""}'
                     f'{" | 静止降频 " + str(stationary.interval) + "帧" if stationary.enabled else ""}'
-                    f'{" | 告警已启用" if alert.enabled else ""}')
+                    f'{" | 告警已启用" if alert.enabled else ""}'
+                    f'{" | 读取 " + src.backend if src.backend != "opencv" else ""}')
 
         while True:
             if stop_event is not None and stop_event.is_set():
@@ -207,7 +210,8 @@ def process(source, cfg, detector, logger, show=None, record=None, on_stats=None
         'infer_ms_avg': round(infer_total / done, 2) if done else 0,
         'infer_ms_max': round(infer_max, 2),
         'per_class_frames': dict(hits), 'unique_tracks': len(ids),
-        'reconnects': src.reconnects,
+        'reconnects': src.reconnects, 'reader': src.backend,
+        'frames_dropped': src.dropped,
         'output_video': sink.output if sink else None,
         'video_parts': sink.parts if sink else [],
         'events': events.events if events else [],

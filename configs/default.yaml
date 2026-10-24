@@ -21,6 +21,8 @@ run:
   retry_delay: 1.0         # 重连间隔秒
   show: false              # 实时预览窗口
   workers: 1               # 目录批量时的并行进程数
+  reader: auto             # auto | opencv | ffmpeg；auto = 直播源走 ffmpeg 子进程（低延迟 + 看门狗），其余 opencv
+  read_timeout: 10         # 直播源多久没收到帧判定僵死并重启（秒）
 
 camera:
   index: 0                 # 摄像头编号

@@ -10,6 +10,16 @@
 - summary 新增 `frames_inference_skipped`、`skip_reasons`、`boxes_low_conf`；
   指标新增 `yolo_inference_skipped_total{reason="stationary"|"motion"}`。
 
+### 变更
+- **读取层拆出 `yolo_app/reader.py`**：`OpenCVReader`（文件/摄像头）与 `FFmpegReader`（直播源）。
+  FFmpeg 后端用 `ffprobe` 探测分辨率/帧率，`ffmpeg -f rawvideo -pix_fmt bgr24` 管道取帧，
+  后台读线程 + `camera.buffer_size` 有界队列（队满丢最旧帧并计数），`run.read_timeout` 判僵死后按
+  `run.reconnect` 语义重启。`VideoSource` 变成门面，新增 `opened/width/height/dropped/backend`。
+- 新增配置 `run.reader`（auto|opencv|ffmpeg，默认 auto）与 `run.read_timeout`（默认 10s）；
+  auto 仅对 RTSP/RTMP/HTTP 直播源启用 FFmpeg，文件与摄像头仍走 OpenCV。
+- Dockerfile 安装 `ffmpeg`（约 +100MB）；不想要可设 `run.reader: opencv`。
+- summary 新增 `reader`、`frames_dropped`；指标新增 `yolo_frames_dropped_total`。
+
 ## v0.5.0 — 健壮性与可观测性（对照 Frigate/supervision 的差距分析）
 
 ### 修复（会直接造成线上事故的路径）

@@ -1,5 +1,6 @@
 """冒烟测试：python -m unittest discover -s tests -v（不起框架，够用就行）。"""
 import json
+import shutil
 import sys
 import threading
 import time
@@ -374,6 +375,7 @@ class TestSourceReconnect(unittest.TestCase):
 
     def test_live_source_recovers(self):
         from unittest import mock
+        import yolo_app.reader as R
         import yolo_app.sources as S
 
         state = {'reads': 0}
@@ -407,8 +409,9 @@ class TestSourceReconnect(unittest.TestCase):
         fake_cv2.CAP_PROP_FPS = cv2.CAP_PROP_FPS
         fake_cv2.CAP_PROP_BUFFERSIZE = cv2.CAP_PROP_BUFFERSIZE
 
-        with mock.patch.object(S, 'cv2', fake_cv2):
-            src = S.VideoSource('rtsp://demo', {'buffer_size': 1}, reconnect=3, retry_delay=0)
+        with mock.patch.object(R, 'cv2', fake_cv2):
+            src = S.VideoSource('rtsp://demo', {'buffer_size': 1}, reconnect=3,
+                                retry_delay=0, reader='opencv')
             frame = src.read()
             self.assertIsNotNone(frame)
             self.assertEqual(src.reconnects, 1)
@@ -418,6 +421,7 @@ class TestSourceReconnect(unittest.TestCase):
 
     def test_offline_file_does_not_reconnect(self):
         from unittest import mock
+        import yolo_app.reader as R
         import yolo_app.sources as S
 
         class DeadCap:
@@ -438,7 +442,7 @@ class TestSourceReconnect(unittest.TestCase):
 
         fake_cv2 = mock.Mock()
         fake_cv2.VideoCapture = lambda uri: DeadCap()
-        with mock.patch.object(S, 'cv2', fake_cv2):
+        with mock.patch.object(R, 'cv2', fake_cv2):
             src = S.VideoSource('data/not-exist.mp4', {}, reconnect=5, retry_delay=0)
             self.assertIsNone(src.read())
             self.assertEqual(src.reconnects, 0)
@@ -566,6 +570,119 @@ class TestCliOverrides(unittest.TestCase):
         from yolo_app.cli import build_overrides, build_parser
         a = build_parser().parse_args(['check', '--report-conf', '0.6'])
         self.assertEqual(build_overrides(a)['model']['report_conf'], 0.6)
+
+
+def _writer_cmd(w, h, n, value=7):
+    """生成一个"往 stdout 写 n 帧 rawvideo"的 python 命令，替代真实 ffmpeg 做单测。"""
+    code = (f"import sys; buf=bytes([{value}])*({w}*{h}*3); "
+            f"sys.stdout.buffer.write(buf*{n}); sys.stdout.flush()")
+    return [sys.executable, '-c', code]
+
+
+class TestReaderBackends(unittest.TestCase):
+    """读取后端选择与 ffprobe 解析：纯逻辑，不启动真实流。"""
+
+    def test_choose_backend_matrix(self):
+        from yolo_app.reader import choose_backend
+        self.assertEqual(choose_backend('rtsp://x', 'auto', has_ffmpeg=True), 'ffmpeg')
+        self.assertEqual(choose_backend('rtsp://x', 'auto', has_ffmpeg=False), 'opencv')
+        self.assertEqual(choose_backend('data/test.mp4', 'auto', has_ffmpeg=True), 'opencv')
+        self.assertEqual(choose_backend('data/test.mp4', 'ffmpeg', has_ffmpeg=False), 'ffmpeg')
+        self.assertEqual(choose_backend('rtsp://x', 'opencv', has_ffmpeg=True), 'opencv')
+
+    def test_parse_rate(self):
+        from yolo_app.reader import parse_rate
+        self.assertAlmostEqual(parse_rate('30000/1001'), 29.97, places=2)
+        self.assertEqual(parse_rate('25'), 25.0)
+        self.assertIsNone(parse_rate('N/A'))
+
+    def test_probe_missing_file(self):
+        from yolo_app.reader import probe_stream
+        self.assertIsNone(probe_stream('/tmp/definitely-not-a-video-xyz.mp4', timeout=5))
+
+
+class TestFFmpegReader(unittest.TestCase):
+
+    """FFmpeg 后端：EOF、僵死重启、队列丢弃（用 fake 子进程，不依赖真实 RTSP）。"""
+
+    info = {'width': 4, 'height': 4, 'fps': 25, 'total': 0}
+
+    def _make(self, cmd, uri='rtsp://demo', **kw):
+        from yolo_app.reader import FFmpegReader
+        return FFmpegReader(uri, self.info, cmd_builder=cmd, retry_delay=0, **kw)
+
+    def test_file_eof(self):
+        r = self._make(lambda: _writer_cmd(4, 4, 3), uri='/tmp/fake.mp4', buffer_size=4)
+        frames = []
+        for _ in range(5):
+            f = r.read()
+            if f is None:
+                break
+            frames.append(f)
+        r.release()
+        self.assertEqual(len(frames), 3)
+        self.assertEqual(frames[0].shape, (4, 4, 3))
+
+    def test_stalled_stream_restarts(self):
+        calls = {'n': 0}
+
+        def builder():
+            calls['n'] += 1
+            if calls['n'] == 1:
+                return [sys.executable, '-c', 'import time; time.sleep(30)']
+            return _writer_cmd(4, 4, 2)
+
+        r = self._make(builder, read_timeout=0.5, reconnect=1, buffer_size=2)
+        try:
+            frame = r.read()                       # 等 0.5s → 判定僵死 → 重启 → 读到帧
+            self.assertIsNotNone(frame)
+            self.assertEqual(r.reconnects, 1)
+        finally:
+            r.release()
+
+    def test_slow_consumer_drops_old_frames(self):
+        r = self._make(lambda: _writer_cmd(4, 4, 300), buffer_size=1, read_timeout=5)
+        try:
+            time.sleep(0.5)                        # 让生产端跑满队列
+            self.assertGreaterEqual(r.dropped, 1)  # 有界队列 + 丢最旧
+        finally:
+            r.release()
+
+    def test_release_stops_thread(self):
+        r = self._make(lambda: _writer_cmd(4, 4, 50), read_timeout=5)
+        r.release()
+        self.assertIsNone(r._proc)
+
+
+class TestVideoSourceFacade(unittest.TestCase):
+    def test_ffmpeg_matches_opencv_on_file(self):
+        """同一文件两后端解码结果应基本一致（仅色彩转换舍入差异）。"""
+        if not shutil.which('ffmpeg'):
+            self.skipTest('未安装 ffmpeg')
+        from yolo_app.reader import VideoReader
+        video = str(ensure_test_video())
+        a = VideoReader(video, mode='opencv')
+        fa = a.read()
+        a.release()
+        b = VideoReader(video, mode='ffmpeg')
+        fb = b.read()
+        b.release()
+        self.assertEqual(fa.shape, fb.shape)
+        diff = np.abs(fa.astype(int) - fb.astype(int))
+        self.assertLessEqual(int(diff.max()), 8)          # swscale 与 OpenCV 的舍入差异
+        self.assertLess(float(diff.mean()), 2.0)
+
+    def test_opencv_backend_for_file(self):
+        from yolo_app.sources import VideoSource
+        ensure_test_video()
+        src = VideoSource(str(ROOT / 'data' / 'test.mp4'))
+        try:
+            self.assertEqual(src.backend, 'opencv')
+            self.assertTrue(src.opened)
+            self.assertGreater(src.width, 0)
+            self.assertIsNotNone(src.read())
+        finally:
+            src.release()
 
 
 class TestWebApp(unittest.TestCase):

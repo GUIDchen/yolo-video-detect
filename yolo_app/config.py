@@ -28,7 +28,9 @@ DEFAULTS = {
     },
     'track': {'enable': False, 'tracker': 'bytetrack.yaml'},
     'run': {'stride': 1, 'max_frames': 0, 'reconnect': 3, 'retry_delay': 1.0,
-            'show': False, 'workers': 1},
+            'show': False, 'workers': 1,
+            'reader': 'auto',      # auto | opencv | ffmpeg；auto = 直播源用 ffmpeg，其余用 opencv
+            'read_timeout': 10},   # 直播源多久没收到帧判定僵死（秒）
     'camera': {'index': 0, 'width': 1280, 'height': 720, 'fps': 30, 'show': True, 'record': False,
                'buffer_size': 1},   # 采集缓冲；1 = 只留最新帧，降低直播延迟
     'analytics': {

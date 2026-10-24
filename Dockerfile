@@ -13,7 +13,8 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
 # opencv-headless 仍需 libgl/libglib 运行时
-RUN apt-get update && apt-get install -y --no-install-recommends libglib2.0-0 libgl1 curl \
+# ffmpeg 供直播源读取后端（run.reader: auto）；不想加大镜像可设 run.reader: opencv
+RUN apt-get update && apt-get install -y --no-install-recommends libglib2.0-0 libgl1 curl ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
