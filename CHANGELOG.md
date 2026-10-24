@@ -1,5 +1,23 @@
 # 变更记录
 
+## v0.4.1 — 本地源码对照调试
+
+### 新增
+- **Makefile 源码对照目标**：
+  - `make install-src`：以 editable 方式安装同级 `../yolo-ultralytics`（`SRC=` 可覆盖路径），并把 `ultralytics-thop` 升到 `>=2.2.3`、`ultralytics-platform` 升到 `>=0.1.45`，最后打印生效版本；
+  - `make install-wheel`：回滚到基线 `ultralytics==8.4.152` / thop 2.1.6 / platform 0.1.41（`BASELINE=` 可覆盖）；
+  - `make yolo-env`：打印当前生效的 ultralytics 版本与导入路径，一眼区分 wheel / 源码。
+- **README 新增「对照调试：本地 ultralytics 源码」**：切换命令、三个必看陷阱（`pip freeze` 的 VCS 渲染、editable 的绝对路径绑定、thop 版本门槛）。
+
+### 变更
+- 版本号 0.4.0 → 0.4.1。
+- README「测试与 CI」「实测记录」的用例数 16 → 20，与当前测试集一致。
+
+### 验证（本机 Apple Silicon，CPU）
+- 源码模式下 `make test`：20 个用例全绿；`pip check` 无冲突。
+- `make install-wheel` → `make install-src` 往返切换实测通过，`make yolo-env` 分别输出 `8.4.152 -> .venv/site-packages/...` 与 `8.4.187 -> ../yolo-ultralytics/ultralytics/__init__.py`。
+- `model.info()`：thop 2.1.6 时静默 `0.0 GFLOPs`，2.2.3 后 `6.7 GFLOPs`。
+
 ## v0.4.0 — 开源发布
 
 ### 新增

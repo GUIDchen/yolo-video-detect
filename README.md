@@ -77,7 +77,7 @@ yolo-video-detect/
 ├── .github/workflows/ci.yml  # CI：ruff + 自检 + 单测 + 端到端
 ├── .vscode/                  # F5 运行配置（6 个）
 ├── Dockerfile / docker-compose.yml / .dockerignore
-├── Makefile                  # make check/test/run/serve/export/docker-*
+├── Makefile                  # make check/test/run/serve/export/docker-*/install-src
 ├── pyproject.toml            # ruff 配置
 ├── .gitignore                # 忽略 .venv / outputs / datasets / 权重
 ├── detect_video.py           # 旧入口兼容壳
@@ -363,17 +363,36 @@ docker build --build-arg BASE=docker.m.daocloud.io/library/python:3.12-slim \
 ## 测试与 CI
 
 ```bash
-.venv/bin/python -m unittest discover -s tests -v     # 16 个用例
+.venv/bin/python -m unittest discover -s tests -v     # 20 个用例
 ruff check yolo_app tests scripts                    # 代码检查
 ```
 
 CI（`.github/workflows/ci.yml`）在 push/PR 时跑：依赖安装 → 拉权重 → ruff → `check` → 单测 → 合成视频端到端。
 
+## 对照调试：本地 ultralytics 源码
+
+需要改 YOLO 源码做对照实验（打日志、改后处理、二分定位版本差异）时，把运行时依赖从 PyPI wheel 换成源码 tree：
+
+```bash
+make install-src                              # 默认源码目录 ../yolo-ultralytics
+make install-src SRC=/path/to/ultralytics     # 源码放在别处
+make yolo-env                                 # 看当前生效的版本与导入路径
+make install-wheel                            # 切回官方 wheel 基线（ultralytics 8.4.152）
+```
+
+`install-src` 做三件事：editable 安装源码、把 `ultralytics-thop` 升到 `>=2.2.3`、`ultralytics-platform` 升到 `>=0.1.45`，最后打印生效版本。editable 安装后改 `.py` 立即生效，不必重装；源码模式下 `make test` 的 20 个用例同样全绿。它用 `--no-deps --no-build-isolation` 安装，要求 venv 内已有 setuptools（`make install` 装依赖时已带入）。
+
+三个坑：
+
+- **`pip freeze` 会把 editable 写成 `-e git+ssh://...`**：源码目录本身是 git 仓库时，pip 会把它渲染成 VCS 形式，固化进 `requirements.txt` 就变成一条依赖远程仓库、且不跟随本地改动的记录。要固化请手写 `-e ../yolo-ultralytics`。
+- **源码目录不能挪**：`site-packages/__editable__.ultralytics-8.4.187.pth` 存的是绝对路径，换位置后必须重跑 `make install-src`。
+- **thop 必须跟着升**：`ultralytics 8.4.187` 起 `get_flops()` 给 `thop.profile()` 传了 `stride=` / `min_cells=`，旧的 `ultralytics-thop 2.1.6` 抛异常后被 `except` 吞掉，`model.info()` 静默显示 `0.0 GFLOPs`；升到 2.2.3 后正常显示 `6.7 GFLOPs`。
+
 ## 实测记录（Apple Silicon，CPU 推理；ultralytics 8.4.152 / torch 2.14.0）
 
 ```
 $ python -m unittest discover -s tests
-Ran 16 tests ... OK
+Ran 20 tests ... OK
 $ ruff check yolo_app tests scripts
 All checks passed!
 
