@@ -14,6 +14,7 @@
   · 收尾时再刷一轮 pending，尽力而为，失败不影响退出；
   · output.events.db 为空时完全退回旧行为：不建库，告警同步发送。
 """
+import hashlib
 import sys
 import time
 from collections import Counter
@@ -30,13 +31,29 @@ from .sources import VideoSource, is_camera
 from .store import EventStore
 
 
+def _source_hash(source):
+    """源绝对路径的 sha1 前 6 位：同一路径跨运行稳定，不同目录的同名文件不会撞车。"""
+    return hashlib.sha1(str(Path(str(source)).resolve()).encode('utf-8')).hexdigest()[:6]
+
+
 def output_paths(cfg, source):
-    """结果文件按源命名：视频取文件名，摄像头取时间戳。"""
+    """结果文件按源命名：视频取文件名，摄像头取时间戳。
+
+    命名模式（cfg.output.name_mode，缺省 stem）：
+      · stem   源文件名主干 + .mp4；同名文件会互相覆盖，保持历史行为；
+      · unique 源文件名主干 + 源绝对路径哈希前 6 位 + .mp4，目录批量处理时防覆盖。
+    摄像头始终用时间戳（unique 对摄像头无意义）；显式 output.name 永远优先。
+    """
     out = Path(cfg['output']['dir'])
     name = cfg['output'].get('name') or ''
     if not name:
-        stem = 'camera_' + time.strftime('%Y%m%d_%H%M%S') if str(source).isdigit() else Path(str(source)).stem
-        name = f'{stem}.mp4'
+        src = str(source)
+        if src.isdigit():
+            name = 'camera_' + time.strftime('%Y%m%d_%H%M%S') + '.mp4'
+        elif cfg['output'].get('name_mode', 'stem') == 'unique':
+            name = f'{Path(src).stem}_{_source_hash(src)}.mp4'
+        else:
+            name = f'{Path(src).stem}.mp4'
     return out / name
 
 
