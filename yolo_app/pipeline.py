@@ -1,6 +1,12 @@
 """处理主循环：读帧 → 推理 → ROI/越线 → 绘制 → 落盘 → 统计 → 告警。
 
 文件、摄像头、RTSP 共用同一条链路；多进程 worker 也复用它。
+
+资源与中断约定（这一层最容易出线上事故，务必保持）：
+  · VideoSource / VideoSink 一律在 finally 里释放——异常、Ctrl-C、面板停机都不能让
+    mp4 缺 moov 原子（播放器打不开）或摄像头句柄泄漏；
+  · stop_event 由 Web 面板/外部注入，主循环每帧检查一次，用于优雅停机；
+  · 中断只"跳出循环并正常收尾"，不吞掉真正的异常（异常继续抛给上层记录）。
 """
 import time
 from collections import Counter
@@ -25,7 +31,8 @@ def output_paths(cfg, source):
     return out / name
 
 
-def process(source, cfg, detector, logger, show=None, record=None, on_stats=None, on_frame=None):
+def process(source, cfg, detector, logger, show=None, record=None, on_stats=None, on_frame=None,
+            stop_event=None):
     """跑完一个视频源，返回统计字典。这是全项目唯一的业务编排入口。
 
     参数：
@@ -36,6 +43,7 @@ def process(source, cfg, detector, logger, show=None, record=None, on_stats=None
         record     是否写结果视频（默认取 cfg.output.video）
         on_stats   每帧回调实时统计，Web 面板用它推送 WebSocket
         on_frame   每帧回调标注图，Web 面板用它生成 MJPEG 流
+        stop_event threading.Event，置位后本轮在下一帧边界干净退出（优雅停机）
     返回：
         summary 字典：帧数、平均 FPS、逐类检测次数、唯一目标数、越线统计、
         事件列表、告警发送计数、视频产物路径（含分段）等，同时写入同名 JSON。
@@ -53,103 +61,133 @@ def process(source, cfg, detector, logger, show=None, record=None, on_stats=None
                     '例如 -v $PWD/data:/app/data，再用 --source data/xxx.mp4')
         elif is_camera(source):
             hint += ('\n  · macOS 权限：系统设置 → 隐私与安全性 → 摄像头 → 勾选 VS Code / 终端，然后重启该应用'
-                    '\n  · 查看可用摄像头：ffmpeg -f avfoundation -list_devices true -i ""'
-                    '\n  · 换个编号试试：--index 1（或设 configs 里 camera.index）')
+                     '\n  · 查看可用摄像头：ffmpeg -f avfoundation -list_devices true -i ""'
+                     '\n  · 换个编号试试：--index 1（或设 configs 里 camera.index）')
         raise RuntimeError(f'无法打开视频源: {source}{hint}')
 
     video_path = output_paths(cfg, source)
-    sink = VideoSink(video_path, src.fps, cfg['output']['segment_seconds']) if record else None
-
-    ev_cfg = cfg['output']['events']
-    events = (EventSink(Path(cfg['output']['dir']) / 'events',
-                        resolve_class_ids(ev_cfg['classes'], detector.names),
-                        ev_cfg['min_conf'], ev_cfg['cooldown_s']) if ev_cfg['enable'] else None)
-    a_cfg = cfg.get('analytics', {})
-    roi = RegionFilter(a_cfg.get('roi'))
-    line = LineCounter(a_cfg.get('line'), resolve_class_ids(a_cfg.get('classes'), detector.names), detector.names)
-    alert = AlertChannel(cfg.get('alert', {}).get('webhook', ''),
-                         cfg.get('alert', {}).get('type', 'generic'),
-                         cfg.get('alert', {}).get('timeout', 5), logger)
-
-    logger.info(f'开始处理 {source} | {int(src.cap.get(cv2.CAP_PROP_FRAME_WIDTH))}x'
-                f'{int(src.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))} @{src.fps:.0f}fps | 设备 {detector.device_name}'
-                f'{" | 跟踪 " + cfg["track"]["tracker"] if detector.track else ""}'
-                f'{" | ROI" if roi.enabled else ""}{" | 越线计数" if line.enabled else ""}'
-                f'{" | 告警已启用" if alert.enabled else ""}')
-
-    hits, ids = Counter(), set()
-    crossings = []
-    idx = done = 0
+    sink = events = roi = line = alert = None
+    hits, ids, crossings = Counter(), set(), []
+    idx = done = skipped = 0
+    interrupted = False
     t0 = time.time()
-    while True:
-        # 2) 取帧：None 表示文件结束或直播流重连失败
-        frame = src.read()
-        if frame is None:
-            break
-        idx += 1
-        if run_cfg['max_frames'] and idx > run_cfg['max_frames']:
-            break
-        if run_cfg['stride'] > 1 and (idx - 1) % run_cfg['stride']:
-            if sink:
-                sink.write(frame)               # 跳过的帧原样写出，保持时长一致
-            continue
+    infer_total = infer_max = 0.0
 
-        # 3) 推理（可选跟踪）→ 4) ROI 过滤：区域外的框直接剔除，后续统计/绘制都看不到
-        res = roi.keep(detector.infer(frame))
-        # 5) 越线计数：按 track_id 判断目标是否从线的一侧穿到另一侧
-        crossed = line.update(res, detector.names)
-        if crossed:                             # 越线事件：计入统计并推送告警
-            for c in crossed:
-                c['frame'] = idx
-                crossings.append(c)
-                alert.send(f'[YOLO 越线] {c["class"]} {c["direction"]} | track {c["track_id"]}')
-        hits.update(detector.names[int(c)] for c in res.boxes.cls.tolist())
-        tids = res.boxes.id.tolist() if res.boxes.id is not None else []
-        ids.update(int(t) for t in tids if t is not None)
-        done += 1
+    try:
+        # 2) 业务组件：录像、抓拍、ROI、越线、告警
+        sink = VideoSink(video_path, src.fps, cfg['output']['segment_seconds']) if record else None
+        ev_cfg = cfg['output']['events']
+        events = (EventSink(Path(cfg['output']['dir']) / 'events',
+                            resolve_class_ids(ev_cfg['classes'], detector.names),
+                            ev_cfg['min_conf'], ev_cfg['cooldown_s']) if ev_cfg['enable'] else None)
+        a_cfg = cfg.get('analytics', {})
+        roi = RegionFilter(a_cfg.get('roi'))
+        line = LineCounter(a_cfg.get('line'), resolve_class_ids(a_cfg.get('classes'), detector.names),
+                           detector.names, track_ttl=a_cfg.get('track_ttl', 300),
+                           min_cross_frames=a_cfg.get('min_cross_frames', 2))
+        al_cfg = cfg.get('alert', {})
+        alert = AlertChannel(al_cfg.get('webhook', ''), al_cfg.get('type', 'generic'),
+                             al_cfg.get('timeout', 5), logger, dedupe_s=al_cfg.get('dedupe_s', 0))
 
-        # 6) 绘制：检测框 + ROI 多边形 + 越线（都画在同一张图上，后续写盘与预览共用）
-        anno = res.plot(labels=True, conf=True)
-        roi.draw(anno)
-        line.draw(anno)
-        # 7) 告警抓拍 + 推送（发送是同步的，失败只记日志）
-        if events and events.check(res, detector.names, idx, anno):
-            alert.notify_event(events.events[-1], source)
-        if sink:
-            sink.write(anno)
-        if show:
-            cv2.imshow('YOLO', anno)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+        logger.info(f'开始处理 {source} | {int(src.cap.get(cv2.CAP_PROP_FRAME_WIDTH))}x'
+                    f'{int(src.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))} @{src.fps:.0f}fps | 设备 {detector.device_name}'
+                    f'{" | 跟踪 " + cfg["track"]["tracker"] if detector.track else ""}'
+                    f'{" | ROI" if roi.enabled else ""}{" | 越线计数" if line.enabled else ""}'
+                    f'{" | 告警已启用" if alert.enabled else ""}')
+
+        while True:
+            if stop_event is not None and stop_event.is_set():
+                interrupted = True
+                logger.info('收到停止信号，处理提前收尾')
                 break
-        if on_frame:
-            on_frame(anno)
-        if on_stats:
-            on_stats({'frames': done, 'fps': round(done / max(time.time() - t0, 1e-6), 1),
-                      'per_class': dict(hits), 'unique_tracks': len(ids),
-                      'line': dict(line.total), 'events': len(events.events) if events else 0})
-        if done % max(cfg['log']['interval'], 1) == 0:
-            el = time.time() - t0 or 1e-6
-            logger.info(f'帧 {idx}/{src.total or "-"} | {done / el:.1f} FPS | {dict(hits)}')
+            # 3) 取帧：None 表示文件结束或直播流重连失败
+            frame = src.read()
+            if frame is None:
+                break
+            idx += 1
+            if run_cfg['max_frames'] and idx > run_cfg['max_frames']:
+                break
+            if run_cfg['stride'] > 1 and (idx - 1) % run_cfg['stride']:
+                skipped += 1
+                if sink:
+                    sink.write(frame)           # 跳过的帧原样写出，保持时长一致
+                continue
 
-    src.release()
-    if sink:
-        sink.close()
-    if show:
-        cv2.destroyAllWindows()
+            # 4) 推理（可选跟踪）→ 5) ROI 过滤：区域外的框直接剔除，后续统计/绘制都看不到
+            t_infer = time.perf_counter()
+            res = roi.keep(detector.infer(frame))
+            cost_ms = (time.perf_counter() - t_infer) * 1000
+            infer_total += cost_ms
+            infer_max = max(infer_max, cost_ms)
+
+            # 6) 越线计数：按 track_id 判断目标是否从线的一侧穿到另一侧
+            crossed = line.update(res, detector.names, frame_no=idx)
+            if crossed:                         # 越线事件：计入统计并推送告警
+                for c in crossed:
+                    c['frame'] = idx
+                    crossings.append(c)
+                    alert.send(f'[YOLO 越线] {c["class"]} {c["direction"]} | track {c["track_id"]}')
+            hits.update(detector.names[int(c)] for c in res.boxes.cls.tolist())
+            tids = res.boxes.id.tolist() if res.boxes.id is not None else []
+            ids.update(int(t) for t in tids if t is not None)
+            done += 1
+
+            # 7) 绘制：检测框 + ROI 多边形 + 越线（都画在同一张图上，后续写盘与预览共用）
+            anno = res.plot(labels=True, conf=True)
+            roi.draw(anno)
+            line.draw(anno)
+            # 8) 告警抓拍 + 推送（发送是同步的，失败只记日志）
+            if events and events.check(res, detector.names, idx, anno):
+                alert.notify_event(events.events[-1], source)
+            if sink:
+                sink.write(anno)
+            if show:
+                cv2.imshow('YOLO', anno)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    interrupted = True
+                    break
+            if on_frame:
+                on_frame(anno)
+            if on_stats:
+                el = max(time.time() - t0, 1e-6)
+                on_stats({'frames': done, 'skipped': skipped, 'fps': round(done / el, 1),
+                          'infer_ms_avg': round(infer_total / done, 2), 'infer_ms_max': round(infer_max, 2),
+                          'per_class': dict(hits), 'unique_tracks': len(ids),
+                          'line': dict(line.total), 'events': len(events.events) if events else 0})
+            if done % max(cfg['log']['interval'], 1) == 0:
+                el = time.time() - t0 or 1e-6
+                logger.info(f'帧 {idx}/{src.total or "-"} | {done / el:.1f} FPS | {dict(hits)}')
+    except KeyboardInterrupt:                   # Ctrl-C：当作"提前结束"，收尾后照常出统计
+        interrupted = True
+        logger.warning('收到 Ctrl-C，正在收尾（写出剩余录像与统计）…')
+    finally:
+        src.release()
+        if sink:
+            sink.close()
+        if show:
+            cv2.destroyAllWindows()
 
     el = time.time() - t0 or 1e-6
+    infer_s = infer_total / 1000
     summary = {
         'source': str(source), 'model': detector.weights,
-        'frames_src': idx, 'frames_inferred': done,
+        'frames_src': idx, 'frames_inferred': done, 'frames_skipped': skipped,
         'elapsed_s': round(el, 1), 'avg_fps': round(done / el, 1),
+        'infer_fps': round(done / infer_s, 1) if infer_s else 0,
+        'infer_ms_avg': round(infer_total / done, 2) if done else 0,
+        'infer_ms_max': round(infer_max, 2),
         'per_class_frames': dict(hits), 'unique_tracks': len(ids),
         'reconnects': src.reconnects,
         'output_video': sink.output if sink else None,
         'video_parts': sink.parts if sink else [],
         'events': events.events if events else [],
-        'alert_sent': alert.sent, 'alert_failed': alert.failed,
+        'alert_sent': alert.sent if alert else 0,
+        'alert_failed': alert.failed if alert else 0,
+        'alert_skipped': alert.skipped if alert else 0,
     }
-    summary.update(line.summary())
+    if interrupted:
+        summary['interrupted'] = True
+    summary.update(line.summary() if line else {'line_total': {'in': 0, 'out': 0}, 'line_by_class': {}})
     if crossings:
         summary['crossings'] = crossings
     if cfg['output']['json']:

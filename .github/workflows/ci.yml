@@ -18,7 +18,7 @@ jobs:
       - name: 安装依赖
         run: |
           pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
-          pip install -r requirements.txt ruff
+          pip install -r requirements.txt ruff httpx   # httpx 供 FastAPI TestClient（面板用例）使用
       - name: 拉取权重与样例图（CI 上 GitHub 可达）
         run: |
           mkdir -p weights data

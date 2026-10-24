@@ -20,6 +20,8 @@
 | 越线计数（按 track_id 判定穿越方向） | `--line "x1,y1,x2,y2" --count-classes person` |
 | 告警抓拍 + webhook 推送 | `--alert-webhook <key或URL> --alert-type wecom` |
 | Web 面板（MJPEG + WebSocket + Prometheus） | `python -m yolo_app serve` |
+| 面板鉴权 / 健康检查 / 优雅停机 | `serve --token` · `/healthz` · SIGTERM 自动收尾 |
+| 越线防抖 + 轨迹回收 | `analytics.min_cross_frames` / `analytics.track_ttl` |
 | 录像分段 / 留存清理 | `--segment-seconds 300 --keep-days 7 --max-files 200` |
 | 模型管理（清单/下载/对照切换） | `python -m yolo_app models [--download ...] [--benchmark]` |
 | 模型导出（ONNX/TensorRT/OpenVINO…） | `python -m yolo_app export --format onnx` |
@@ -87,6 +89,8 @@ yolo-video-detect/
 > 想知道"每个文件到底干什么、一帧数据怎么流动、要加功能该改哪里"，看 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)；
 > 想**逐行**读懂代码（每行在做什么、为什么这么写、删掉会怎样），看 [docs/CODE_WALKTHROUGH.md](docs/CODE_WALKTHROUGH.md)。
 > 每个 Python 模块头部也有详细的职责说明与扩展点注解。
+> 想知道**还能怎么改、为什么这么改**（对照 Frigate / supervision 等标杆的差距分析、P1/P2 路线与验收标准），
+> 看 [docs/OPTIMIZATION.md](docs/OPTIMIZATION.md)。
 
 ## 安装
 
@@ -147,7 +151,7 @@ $ python -m yolo_app run --source data/test.mp4 --track --max-frames 5 --out-dir
 | `camera` | 摄像头实时检测（`--index/--width/--height/--fps/--record/--no-show`） |
 | `check` | 环境与模型自检 |
 | `export --format` | 导出 onnx / engine / openvino / torchscript / coreml |
-| `serve` | Web 面板（`--host/--port/--quality`） |
+| `serve` | Web 面板（`--host/--port/--quality/--token`） |
 
 ### 通用参数
 `--config`、`--model`、`--imgsz`、`--conf`、`--iou`、`--device`、`--classes`、
@@ -163,6 +167,7 @@ $ python -m yolo_app run --source data/test.mp4 --track --max-frames 5 --out-dir
 | `--segment-seconds` | 录像分段秒数 |
 | `--keep-days` / `--max-files` | 输出留存清理 |
 | `--workers` | 目录批量的并行进程数 |
+| `--token` | `serve` 面板访问 token；设置后 /stats /metrics /stream /ws 需带 `?token=` |
 
 ## 业务后处理：ROI 与越线计数
 
@@ -176,6 +181,8 @@ python -m yolo_app run --source data/test.mp4 --track \
 - ROI 用中心点射线法判定，框中心在多边形内才保留；ROI 与线都会画在结果视频上。
 - 越线方向约定：线由 p1→p2，逆时针侧为 +、顺时针侧为 −；**− 侧穿到 + 侧记为 in**（水平线左→右时，自上而下为 in）。
 - 计数按 `track_id` 跨帧判定，**必须开 `--track`**；结果写进 JSON 的 `line_total` / `line_by_class` / `crossings`。
+- 默认开防抖：目标要在新的一侧连续 2 帧（`analytics.min_cross_frames`）才计一次，框中心在线附近抖动不会刷计数；
+  轨迹超过 `analytics.track_ttl` 帧未再出现即回收，长时间直播不会内存膨胀。
 
 ## 告警通道
 
@@ -363,7 +370,7 @@ docker build --build-arg BASE=docker.m.daocloud.io/library/python:3.12-slim \
 ## 测试与 CI
 
 ```bash
-.venv/bin/python -m unittest discover -s tests -v     # 20 个用例
+.venv/bin/python -m unittest discover -s tests -v     # 34 个用例
 ruff check yolo_app tests scripts                    # 代码检查
 ```
 
@@ -392,7 +399,7 @@ make install-wheel                            # 切回官方 wheel 基线（ultr
 
 ```
 $ python -m unittest discover -s tests
-Ran 20 tests ... OK
+Ran 34 tests ... OK
 $ ruff check yolo_app tests scripts
 All checks passed!
 
@@ -422,8 +429,13 @@ $ docker build --build-arg BASE=docker.m.daocloud.io/library/python:3.12-slim ..
 **本轮已全部实现**：TensorRT/ONNX 导出、多路多进程并发、ROI + 越线计数、告警通道（webhook/企业微信/飞书）、
 FastAPI + WebSocket 面板、Docker（headless）、录像分段留存、Prometheus 指标、CI、自有数据 fine-tune 脚本。
 
-**仍可继续（有真实需求再做）**
-1. 告警图片推送：企业微信/飞书需先调用各自媒体上传接口拿 media_id，再发图片消息。
+**v0.5.0（健壮性与可观测性）**：异常/中断路径资源收尾、stop_event 优雅停机、直播重连语义修正、
+越线防抖与轨迹回收、告警去重、推理耗时与跳帧指标、`/healthz` 健康检查、面板 token 鉴权。
+
+**仍可继续（有真实需求再做）**——完整的优先级、改造量与验收标准见 [docs/OPTIMIZATION.md](docs/OPTIMIZATION.md)
+1. 读取层重构（FFmpeg 子进程/PyAV + 有界队列 + 看门狗），解决 RTSP 僵死与延迟累积。
+2. 运动门控 + ROI 裁剪推理：单机 CPU 场景收益最大的两项。
+3. 告警图片推送：企业微信/飞书需先调用各自媒体上传接口拿 media_id，再发图片消息。
 2. 采样抽帧替代跳帧：`--stride` 目前原样写出跳过帧，改成"最近一帧结果复用"可让画面更连续。
 3. 多路摄像头进程池化：当前多进程只用于目录批量，摄像头多路可复用同一套 `run_job`。
 4. GPU 批推理：多路共用一张卡时用 batch 合并推理，比一进程一模型更省显存。

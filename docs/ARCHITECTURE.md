@@ -44,17 +44,20 @@
 
 ## 一帧数据的完整链路
 
-1. **取帧** `sources.VideoSource.read()` —— 摄像头/RTSP 读失败会按 `run.reconnect` 重连。
+1. **取帧** `sources.VideoSource.read()` —— 摄像头/RTSP 读失败按 `run.reconnect` 连续重试（成功一帧即清零计数），
+   直播源会设 `camera.buffer_size` 只保留最新帧。
 2. **跳帧判断** `pipeline.process` —— `run.stride` 命中则原样写帧（保持视频时长）并 continue。
 3. **推理/跟踪** `detector.Detector.infer()` —— `track.enable` 决定走 `model.track(persist=True)` 还是 `model.predict`。
 4. **ROI 过滤** `analytics.RegionFilter.keep()` —— 框中心落在多边形外则从结果里剔除（直接改 `res.boxes`，后续统计/绘制都只看到区域内目标）。
-5. **越线计数** `analytics.LineCounter.update()` —— 用 `track_id` 记住上一帧所在侧，翻转即记一次 in/out。
+5. **越线计数** `analytics.LineCounter.update()` —— 用 `track_id` 记住上一帧所在侧；目标需连续 `min_cross_frames` 帧
+   落在新侧才记一次 in/out（抖动自动撤销），超过 `track_ttl` 帧未出现的 track 会被回收。
 6. **绘制** `res.plot()` + ROI 多边形 + 越线线（都是画在同一张 ndarray 上）。
 7. **事件抓拍** `outputs.EventSink.check()` —— 命中所配类别且置信度达标且过了冷却时间 → 存图 + 记事件。
-8. **告警** `alerts.AlertChannel` —— 抓拍与越线都会发一条文本；失败只记日志。
+8. **告警** `alerts.AlertChannel` —— 抓拍与越线都会发一条文本；`alert.dedupe_s` 窗口内相同文本只发一次，失败只记日志。
 9. **写盘** `outputs.VideoSink.write()` —— 首帧才建 writer（兼容未知分辨率的直播源），H.264 优先，按 `segment_seconds` 切分。
 10. **回调** `on_frame` / `on_stats` —— Web 面板据此取最新画面与统计，本机跑时为空。
-11. **收尾** —— 汇总统计写 `<源名>.json`，多源时再写 `summary_all.json`。
+11. **收尾** —— 无论正常结束、Ctrl-C 还是 `stop_event` 置位，都在 `finally` 里 release 源与写手（mp4 才有 moov），
+    再汇总统计写 `<源名>.json`；多源时另写 `summary_all.json`。
 
 ## 配置流
 
@@ -76,7 +79,7 @@ cfg 字典 —— 全程只读传递，不依赖全局变量
 | --- | --- | --- |
 | 单路检测 | 单进程单线程 | 最简单，够用 |
 | 目录批量 | `ProcessPoolExecutor`，一源一进程 | `--workers N`，各自加载模型（不用共享显存） |
-| Web 面板 | 检测线程 + uvicorn 主线程 | `AppState` + 锁共享最新帧与统计 |
+| Web 面板 | 检测线程 + uvicorn 主线程 | `AppState` + 锁共享最新帧与统计；lifespan 关闭时置位 `stop_event` 并 join(10s) |
 
 ## 扩展点（改哪里）
 

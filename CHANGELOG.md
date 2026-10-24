@@ -1,5 +1,37 @@
 # 变更记录
 
+## v0.5.0 — 健壮性与可观测性（对照 Frigate/supervision 的差距分析）
+
+### 修复（会直接造成线上事故的路径）
+- **资源收尾**：`pipeline.process` 主循环改为 `try/finally`，异常 / Ctrl-C / 面板停机都会释放视频源与写手。
+  此前推理中途异常会让 mp4 缺 moov 原子（播放器打不开）、摄像头句柄泄漏。
+- **重连语义**：`run.reconnect` 从"整段运行累计次数"改为"单次故障连续重试次数"，成功读到帧即清零；
+  负数 = 无限重试。旧实现断流三次后就永久不再重连。
+- **轨迹回收**：`LineCounter` 新增 `track_ttl`（默认 300 帧），淘汰消失的 track，避免 7×24 直播内存线性增长。
+- **越线防抖**：新增 `analytics.min_cross_frames`（默认 2），连续 N 帧落在新侧才计一次，抖动自动撤销。
+
+### 新增
+- **`/healthz`**：毫秒级健康检查（读内存状态），Docker HEALTHCHECK 由"每次加载模型跑 check"改为 curl 该端点。
+- **面板鉴权**：`serve.token` / `serve --token`，`/stats /metrics /stream /ws` 需 `?token=` 或 `X-Token`；
+  监听非回环且未设 token 时启动日志告警。
+- **优雅停机**：`pipeline.process(stop_event=...)` + FastAPI lifespan，SIGTERM 时在帧边界收尾（join 10s）。
+- **告警去重**：`alert.dedupe_s`（默认 3s），相同文本窗口内只发一次，`summary.alert_skipped` 计数。
+- **采集缓冲**：`camera.buffer_size`（默认 1），直播源只保留最新帧，降低延迟累积。
+- **指标补全**：`yolo_infer_milliseconds_avg/max`、`yolo_frames_skipped_total`、`yolo_reconnects_total`、
+  `yolo_alert_sent/failed/skipped_total`；`summary` 增加 `infer_fps`、`frames_skipped`、`interrupted`。
+- **`docs/OPTIMIZATION.md`**：整仓评审 + 标杆对照（Frigate/supervision/Ultralytics/vidgear/PyAV/k8s）+
+  P0/P1/P2 路线与验收标准。
+
+### 变更
+- 版本号 0.4.1 → 0.5.0；README 能力清单、参数表、路线图同步。
+- `avg_fps` 语义澄清为端到端帧率，新增 `infer_fps` 表示纯推理帧率（不再把重连/告警阻塞计入分母）。
+- 测试 20 → **34**（新增资源收尾、停机、重连、防抖、去重、指标、面板鉴权用例）。
+
+### 验证
+- `make test` 34 个用例全绿，`ruff` 通过。
+- 面板实测：`/healthz` 返回内存状态；无 token 401、有 token 200；`/metrics` 含全部新指标。
+- 优雅停机实测：30s 视频跑到第 158 帧时 SIGTERM → 日志"收到停止信号"→ JSON `interrupted: true`、mp4 可播放且 158 帧。
+
 ## v0.4.1 — 本地源码对照调试
 
 ### 新增

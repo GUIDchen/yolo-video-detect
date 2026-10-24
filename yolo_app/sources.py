@@ -39,7 +39,8 @@ class VideoSource:
         self.camera = camera or {}
         self.reconnect, self.retry_delay = reconnect, retry_delay
         self.cap = None
-        self.reconnects = 0
+        self.reconnects = 0                 # 整段运行累计重连次数（写进统计）
+        self._fails = 0                     # 连续失败次数，读到帧就清零
         self._open()
 
     @property
@@ -48,24 +49,40 @@ class VideoSource:
 
     def _open(self):
         self.cap = cv2.VideoCapture(self.uri)
+        c = self.camera or {}
         if is_camera(self.uri):                      # 摄像头：申请指定分辨率/帧率
-            c = self.camera
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, c.get('width', 1280))
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, c.get('height', 720))
             self.cap.set(cv2.CAP_PROP_FPS, c.get('fps', 30))
+        # 直播源只保留最新帧：缓冲里堆积的旧帧只会变成延迟，且会让重连后"追赶"很久
+        if self.is_live and c.get('buffer_size'):
+            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, int(c['buffer_size']))
         return self.cap.isOpened()
 
     def read(self):
+        """读一帧；直播源读失败时按连续失败次数重连，文件源直接返回 None 结束。
+
+        语义与配置对齐：run.reconnect = 单次故障最多连续重连几次（0 = 不重连，负数 = 无限重试），
+        成功读到一帧后计数清零——老实现把重连次数记成"整段运行的总次数"，直播流恢复几次后
+        就再也不重连了。
+        """
         ok, frame = self.cap.read()
         if ok:
+            self._fails = 0
             return frame
-        if self.is_live and self.reconnects < self.reconnect:   # 掉线重连
+        if not self.is_live:
+            return None
+        limit = self.reconnect if self.reconnect is not None else 0
+        while limit < 0 or self._fails < limit:
+            self._fails += 1
             self.reconnects += 1
             time.sleep(self.retry_delay)
             self.cap.release()
             if self._open():
                 ok, frame = self.cap.read()
-                return frame if ok else None
+                if ok:
+                    self._fails = 0
+                    return frame
         return None
 
     @property

@@ -2,6 +2,7 @@
 import json
 import sys
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -110,7 +111,7 @@ class TestAnalytics(unittest.TestCase):
         self.assertEqual(len(kept.boxes), 1)          # 只留区域内那个
 
     def test_line_counter_counts_crossing(self):
-        counter = LineCounter([[0, 50], [100, 50]])
+        counter = LineCounter([[0, 50], [100, 50]], min_cross_frames=1)   # 关防抖，逐帧判定
         top = FakeRes(FakeBoxes([[40, 5, 60, 15]], [0], [7]))       # 框中心 y=10，线之上（- 侧）
         bottom = FakeRes(FakeBoxes([[40, 85, 60, 95]], [0], [7]))   # 中心 y=90，线之下（+ 侧）
         counter.update(top, {0: 'person'})
@@ -121,6 +122,31 @@ class TestAnalytics(unittest.TestCase):
         crossed = counter.update(top, {0: 'person'})                 # 再穿回去 = out
         self.assertEqual(crossed[0]['direction'], 'out')
         self.assertEqual(counter.total['out'], 1)
+
+
+class TestLineDebounce(unittest.TestCase):
+    """越线防抖：抖动不该刷计数，连续 N 帧才认定穿越。"""
+
+    def _res(self, cy, tid=1):
+        return FakeRes(FakeBoxes([[40, cy - 5, 60, cy + 5]], [0], [tid]))
+
+    def test_single_frame_flip_is_ignored_by_default(self):
+        counter = LineCounter([[0, 50], [100, 50]])          # 默认 min_cross_frames=2
+        counter.update(self._res(10), {0: 'person'})         # - 侧
+        self.assertIsNone(counter.update(self._res(90), {0: 'person'}))   # 抖到 + 侧 1 帧
+        self.assertEqual(counter.total['in'], 0)
+        self.assertIsNone(counter.update(self._res(10), {0: 'person'}))   # 抖回去，撤销
+        self.assertEqual(counter.total['in'] + counter.total['out'], 0)
+
+    def test_two_consecutive_frames_confirm_crossing(self):
+        counter = LineCounter([[0, 50], [100, 50]], min_cross_frames=2)
+        counter.update(self._res(10), {0: 'person'})
+        self.assertIsNone(counter.update(self._res(90), {0: 'person'}))
+        crossed = counter.update(self._res(90), {0: 'person'})            # 第 2 帧确认
+        self.assertEqual(crossed[0]['direction'], 'in')
+        self.assertEqual(counter.total['in'], 1)
+        self.assertIsNone(counter.update(self._res(90), {0: 'person'}))   # 巩固不再重复计数
+        self.assertEqual(counter.total['in'], 1)
 
 
 class TestAlerts(unittest.TestCase):
@@ -277,6 +303,239 @@ class TestModels(unittest.TestCase):
         self.assertIn('person:5', text)
         self.assertIn('失败', text)
         self.assertEqual(M.format_table([]), '(无结果)')
+
+
+
+class TestConfigOverride(unittest.TestCase):
+    """覆盖合并：0 / False / 空字符串这类"假值"必须能覆盖掉默认值。"""
+
+    def test_falsy_override_wins(self):
+        cfg = load_config(None, {'run': {'max_frames': 0}, 'output': {'video': False},
+                                 'alert': {'webhook': ''}, 'model': {'conf': 0.1}})
+        self.assertEqual(cfg['run']['max_frames'], 0)
+        self.assertFalse(cfg['output']['video'])
+        self.assertEqual(cfg['alert']['webhook'], '')
+        self.assertEqual(cfg['model']['conf'], 0.1)
+
+    def test_new_knobs_have_defaults(self):
+        cfg = load_config(None, None)
+        self.assertEqual(cfg['analytics']['track_ttl'], 300)
+        self.assertEqual(cfg['alert']['dedupe_s'], 3.0)
+        self.assertEqual(cfg['camera']['buffer_size'], 1)
+        self.assertEqual(cfg['serve']['token'], '')
+
+
+class TestLineCounterMemory(unittest.TestCase):
+    """长视频里 track 状态必须有界，否则内存只增不减。"""
+
+    def _box(self, cx, cy, tid):
+        return FakeBoxes([[cx - 5, cy - 5, cx + 5, cy + 5]], [0], [tid])
+
+    def test_track_ttl_evicts_stale_tracks(self):
+        counter = LineCounter([[0, 50], [100, 50]], track_ttl=10)
+        for frame in range(1, 201):
+            counter.update(FakeRes(self._box(50, 90, frame)), {0: 'person'}, frame_no=frame)
+            self.assertLessEqual(counter.active_tracks, 11)      # ttl=10 → 最多 11 个存活
+        self.assertLessEqual(len(counter.prev), 11)
+
+    def test_no_ttl_keeps_legacy_behaviour(self):
+        counter = LineCounter([[0, 50], [100, 50]], track_ttl=0)
+        for frame in range(1, 50):
+            counter.update(FakeRes(self._box(50, 90, frame)), {0: 'person'}, frame_no=frame)
+        self.assertEqual(counter.active_tracks, 49)
+
+
+class TestAlertDedupe(unittest.TestCase):
+    def test_same_text_within_window_is_skipped(self):
+        ch = AlertChannel('http://127.0.0.1:1/x', 'generic', timeout=1, dedupe_s=30)
+        self.assertFalse(ch.send('同一个告警'))          # 不可达，但去重键已登记
+        self.assertFalse(ch.send('同一个告警'))
+        self.assertEqual(ch.skipped, 1)
+
+    def test_dedupe_off_by_default(self):
+        ch = AlertChannel('http://127.0.0.1:1/x', 'generic', timeout=1)
+        self.assertEqual(ch.dedupe_s, 0)
+
+
+class TestMetricsExtra(unittest.TestCase):
+    def test_latency_and_alert_metrics(self):
+        text = prometheus_text({'frames': 5, 'infer_ms_avg': 12.345, 'infer_ms_max': 40.0,
+                                'reconnects': 2, 'alert_sent': 3, 'alert_failed': 1, 'alert_skipped': 4})
+        self.assertIn('yolo_infer_milliseconds_avg 12.35', text)
+        self.assertIn('yolo_infer_milliseconds_max 40.00', text)
+        self.assertIn('yolo_reconnects_total 2', text)
+        self.assertIn('yolo_alert_skipped_total 4', text)
+
+
+class TestSourceReconnect(unittest.TestCase):
+    """断流重连：失败几帧后能恢复，且成功后计数清零，不会"用光"重连额度。"""
+
+    def test_live_source_recovers(self):
+        from unittest import mock
+        import yolo_app.sources as S
+
+        state = {'reads': 0}
+
+        class FakeCap:
+            def __init__(self, uri):
+                self.uri = uri
+
+            def isOpened(self):
+                return True
+
+            def read(self):
+                state['reads'] += 1
+                if state['reads'] <= 1:              # 第一次读失败，模拟掉线
+                    return False, None
+                return True, np.zeros((4, 4, 3), np.uint8)
+
+            def get(self, prop):
+                return 25.0
+
+            def set(self, *a):
+                return True
+
+            def release(self):
+                pass
+
+        fake_cv2 = mock.Mock()
+        fake_cv2.VideoCapture = FakeCap
+        fake_cv2.CAP_PROP_FRAME_WIDTH = cv2.CAP_PROP_FRAME_WIDTH
+        fake_cv2.CAP_PROP_FRAME_HEIGHT = cv2.CAP_PROP_FRAME_HEIGHT
+        fake_cv2.CAP_PROP_FPS = cv2.CAP_PROP_FPS
+        fake_cv2.CAP_PROP_BUFFERSIZE = cv2.CAP_PROP_BUFFERSIZE
+
+        with mock.patch.object(S, 'cv2', fake_cv2):
+            src = S.VideoSource('rtsp://demo', {'buffer_size': 1}, reconnect=3, retry_delay=0)
+            frame = src.read()
+            self.assertIsNotNone(frame)
+            self.assertEqual(src.reconnects, 1)
+            self.assertIsNotNone(src.read())                  # 恢复后继续正常读
+            self.assertEqual(src.reconnects, 1)               # 没有继续累加
+            src.release()
+
+    def test_offline_file_does_not_reconnect(self):
+        from unittest import mock
+        import yolo_app.sources as S
+
+        class DeadCap:
+            def isOpened(self):
+                return True
+
+            def read(self):
+                return False, None
+
+            def get(self, prop):
+                return 0
+
+            def set(self, *a):
+                return True
+
+            def release(self):
+                pass
+
+        fake_cv2 = mock.Mock()
+        fake_cv2.VideoCapture = lambda uri: DeadCap()
+        with mock.patch.object(S, 'cv2', fake_cv2):
+            src = S.VideoSource('data/not-exist.mp4', {}, reconnect=5, retry_delay=0)
+            self.assertIsNone(src.read())
+            self.assertEqual(src.reconnects, 0)
+
+
+class TestPipelineResilience(unittest.TestCase):
+    """异常与停机路径：录像必须收尾，统计必须照常产出。"""
+
+    def _skip_without_weights(self):
+        if not (ROOT / 'weights' / 'yolo11n.pt').exists():
+            self.skipTest('缺少 weights/yolo11n.pt')
+
+    def test_error_mid_run_still_finalises_video(self):
+        self._skip_without_weights()
+        from yolo_app.detector import Detector
+        from yolo_app.logging_setup import get_logger
+        from yolo_app.pipeline import process
+
+        cfg = load_config(None, {'run': {'max_frames': 5},
+                                 'output': {'name': '_resil.mp4', 'json': False,
+                                            'events': {'enable': False}}})
+        det = Detector(cfg)
+        real = det.infer
+        calls = {'n': 0}
+
+        def boom(frame):
+            calls['n'] += 1
+            if calls['n'] >= 2:
+                raise RuntimeError('模拟推理崩溃')
+            return real(frame)
+
+        det.infer = boom
+        with self.assertRaises(RuntimeError):
+            process(str(ensure_test_video()), cfg, det, get_logger('ERROR'))
+
+        out = ROOT / 'outputs' / '_resil.mp4'
+        cap = cv2.VideoCapture(str(out))          # 没 close 的话 mp4 缺 moov，isOpened 为 False
+        self.assertTrue(cap.isOpened())
+        cap.release()
+        out.unlink()
+
+    def test_stop_event_interrupts_cleanly(self):
+        self._skip_without_weights()
+        from yolo_app.detector import Detector
+        from yolo_app.logging_setup import get_logger
+        from yolo_app.pipeline import process
+
+        cfg = load_config(None, {'output': {'name': '_stop.mp4', 'json': False,
+                                            'events': {'enable': False}}})
+        det = Detector(cfg)
+        real = det.infer
+        stop = threading.Event()
+
+        def infer_then_stop(frame):
+            stop.set()                            # 第一帧处理完就要停
+            return real(frame)
+
+        det.infer = infer_then_stop
+        summary = process(str(ensure_test_video()), cfg, det, get_logger('ERROR'), stop_event=stop)
+        self.assertTrue(summary.get('interrupted'))
+        self.assertGreaterEqual(summary['frames_inferred'], 1)
+        out = Path(summary['output_video'])
+        self.assertTrue(out.exists())
+        out.unlink()
+
+
+class TestWebApp(unittest.TestCase):
+    """/healthz 与 token 鉴权：面板对外暴露时这两条是底线。"""
+
+    def test_healthz_and_token_guard(self):
+        if not (ROOT / 'weights' / 'yolo11n.pt').exists():
+            self.skipTest('缺少 weights/yolo11n.pt')
+        try:
+            from fastapi.testclient import TestClient
+        except Exception as e:                       # 干净环境没装 httpx 时跳过，不误报失败
+            self.skipTest(f'缺少 TestClient 依赖: {e}')
+        from yolo_app.detector import Detector
+        from yolo_app.logging_setup import get_logger
+        from yolo_app.webapp import create_app
+
+        cfg = load_config(None, {'run': {'max_frames': 2},
+                                 'output': {'video': False, 'json': False,
+                                            'events': {'enable': False}},
+                                 'serve': {'token': 'secret'}})
+        app = create_app(cfg, Detector(cfg), get_logger('ERROR'), str(ensure_test_video()))
+        with TestClient(app) as c:                   # 退出时触发 shutdown，验证优雅停机路径
+            self.assertEqual(c.get('/healthz').status_code, 200)
+            self.assertEqual(c.get('/stats').status_code, 401)       # 无 token
+            r = c.get('/stats', params={'token': 'secret'})
+            for _ in range(100):                     # 等检测线程推出第一帧统计
+                if 'frames' in r.json():
+                    break
+                time.sleep(0.1)
+                r = c.get('/stats', params={'token': 'secret'})
+            self.assertEqual(r.status_code, 200)
+            self.assertIn('frames', r.json())
+            m = c.get('/metrics', headers={'X-Token': 'secret'})
+            self.assertEqual(m.status_code, 200)
+            self.assertIn('yolo_up 1', m.text)
 
 
 if __name__ == '__main__':

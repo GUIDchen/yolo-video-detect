@@ -8,6 +8,7 @@
   · 传 key 与传完整 URL 都行：不以 http 开头时按类型自动拼接官方接口前缀。
 """
 import json
+import time
 import urllib.request
 
 WECOM = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key="
@@ -17,9 +18,11 @@ FEISHU = "https://open.feishu.cn/open-apis/bot/v2/hook/"
 class AlertChannel:
     """type: wecom(企业微信) / feishu(飞书) / generic(原样 POST JSON)。失败只记日志，不中断检测。"""
 
-    def __init__(self, url="", kind="generic", timeout=5, logger=None):
+    def __init__(self, url="", kind="generic", timeout=5, logger=None, dedupe_s=0.0):
         self.url, self.kind, self.timeout, self.logger = url, kind, timeout, logger
-        self.sent, self.failed = 0, 0
+        self.sent, self.failed, self.skipped = 0, 0, 0
+        self.dedupe_s = float(dedupe_s or 0)
+        self._seen = {}                 # 告警文本 -> 上次发送时间（用于窗口内去重）
         if url and not url.startswith("http"):
             if kind == "wecom":
                 self.url = WECOM + url
@@ -38,9 +41,21 @@ class AlertChannel:
         return {"text": text}
 
     def send(self, text):
-        """发送一条文本告警；返回是否成功。异常一律吞掉，绝不影响检测主流程。"""
+        """发送一条文本告警；返回是否成功。异常一律吞掉，绝不影响检测主流程。
+
+        去重：dedupe_s > 0 时，相同文本在该窗口内只发一次。越线事件里同一个目标
+        可能在阈值附近来回抖动触发多条一模一样的消息，去重比重试更能减少骚扰。
+        """
         if not self.enabled:
             return False
+        now = time.time()
+        if self.dedupe_s > 0:
+            last = self._seen.get(text)
+            if last is not None and now - last < self.dedupe_s:
+                self.skipped += 1
+                return False
+            self._seen = {k: t for k, t in self._seen.items() if now - t < self.dedupe_s}   # 顺带清理过期键
+            self._seen[text] = now
         try:
             req = urllib.request.Request(self.url,
                                         data=json.dumps(self._payload(text)).encode("utf-8"),

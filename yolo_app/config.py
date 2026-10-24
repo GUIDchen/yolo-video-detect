@@ -28,13 +28,17 @@ DEFAULTS = {
     'track': {'enable': False, 'tracker': 'bytetrack.yaml'},
     'run': {'stride': 1, 'max_frames': 0, 'reconnect': 3, 'retry_delay': 1.0,
             'show': False, 'workers': 1},
-    'camera': {'index': 0, 'width': 1280, 'height': 720, 'fps': 30, 'show': True, 'record': False},
+    'camera': {'index': 0, 'width': 1280, 'height': 720, 'fps': 30, 'show': True, 'record': False,
+               'buffer_size': 1},   # 采集缓冲；1 = 只留最新帧，降低直播延迟
     'analytics': {
         'roi': [],             # [[x,y],...] 多边形，只统计区域内目标；空 = 不过滤
         'line': [],            # [[x1,y1],[x2,y2]] 越线，需配合 --track
         'classes': [],         # 参与越线计数的类别；空 = 全部
+        'track_ttl': 300,      # 越线计数里 track 的存活帧数，超时即淘汰（防长视频内存增长）；0 = 不淘汰
+        'min_cross_frames': 2, # 越线防抖：连续 N 帧落在新的一侧才计一次穿越；1 = 不防抖
     },
-    'alert': {'webhook': '', 'type': 'generic', 'timeout': 5},
+    'alert': {'webhook': '', 'type': 'generic', 'timeout': 5, 'dedupe_s': 3.0},
+    'serve': {'host': '127.0.0.1', 'port': 8000, 'source': '0', 'quality': 80, 'token': ''},
     'output': {
         'dir': 'outputs',
         'video': True,
@@ -45,7 +49,6 @@ DEFAULTS = {
         'max_files': 0,        # >0 只保留最近 N 个输出文件
         'events': {'enable': True, 'classes': [0], 'min_conf': 0.6, 'cooldown_s': 2.0},
     },
-    'serve': {'host': '127.0.0.1', 'port': 8000, 'source': '0', 'quality': 80},
     'metrics': {'file': ''},   # 非空则把 Prometheus 指标同时写到该文件
     'log': {'level': 'INFO', 'interval': 30, 'file': ''},   # file 非空则同时写日志文件
 }

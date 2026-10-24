@@ -169,6 +169,7 @@ def build_parser():
     ps.add_argument('--host', default=None)
     ps.add_argument('--port', type=int, default=None)
     ps.add_argument('--quality', type=int, default=None, help='JPEG 质量 1-100')
+    ps.add_argument('--token', default=None, help='访问 token；非空时 /stats /metrics /stream /ws 需带 ?token=')
     ps.add_argument('--show', dest='show', action='store_true', default=None, help=argparse.SUPPRESS)
     add_analytics(ps)
     add_common(ps)
@@ -201,7 +202,8 @@ def main(argv=None):
         ov['camera'] = cam
     if a.cmd == 'serve':
         sv = {}
-        for key, val in (('source', a.source), ('host', a.host), ('port', a.port), ('quality', a.quality)):
+        for key, val in (('source', a.source), ('host', a.host), ('port', a.port), ('quality', a.quality),
+                         ('token', a.token)):
             if val is not None:
                 sv[key] = val
         ov['serve'] = sv

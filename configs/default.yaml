@@ -28,16 +28,21 @@ camera:
   fps: 30
   show: true               # camera 子命令默认弹实时窗口
   record: false            # 是否保存录像
+  buffer_size: 1           # 直播源采集缓冲：1 = 只留最新帧，别让旧帧堆成延迟
+
 
 analytics:
   roi: []                  # ROI 多边形，如 [[100,100],[500,100],[500,400],[100,400]]，只统计区域内目标
   line: []                 # 越线计数线，如 [[0,300],[640,300]]（需配合 --track）
   classes: []              # 参与越线计数的类别；空 = 全部
+  track_ttl: 300           # 越线计数里 track 状态保留帧数，超时淘汰（长视频防内存增长）；0 = 不淘汰
+  min_cross_frames: 2      # 越线防抖：连续 N 帧在新侧才计一次；1 = 单帧即判定（易被抖动刷计数）
 
 alert:
   webhook: ''              # 企业微信/飞书机器人 key，或任意接收 JSON 的 URL
   type: generic            # generic | wecom | feishu
   timeout: 5
+  dedupe_s: 3.0            # 相同告警文本的静默窗口（秒），0 = 不去重
 
 output:
   dir: outputs             # 结果目录
@@ -58,6 +63,7 @@ serve:                     # Web 面板
   port: 8000
   source: '0'              # 视频文件 / 目录 / RTSP / 摄像头编号
   quality: 80              # MJPEG 质量
+  token: ''                # 非空时 /stats /metrics /stream /ws 需带 ?token=xxx；对外暴露时务必设置
 
 metrics:
   file: ''                 # 非空则把 Prometheus 指标同时写到该文件

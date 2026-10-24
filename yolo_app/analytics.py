@@ -70,21 +70,34 @@ class LineCounter:
     - 侧穿到 + 侧记为 in，+ 侧穿到 - 侧记为 out（水平线 p1 在左 p2 在右时，自上而下为 in）。
     """
 
-    def __init__(self, line, classes=None, names=None):
+    def __init__(self, line, classes=None, names=None, track_ttl=300, min_cross_frames=2):
         self.line = line or []
         self.classes = set(classes or [])
         self.names = names or {}
-        self.prev = {}
+        self.prev = {}                 # track_id -> 所在侧
         self.total = {"in": 0, "out": 0}
         self.by_class = defaultdict(lambda: {"in": 0, "out": 0})
+        self.track_ttl = int(track_ttl or 0)   # 0 = 不淘汰（老行为）
+        # 越线防抖：目标必须在"新的一侧"连续出现 N 帧才计一次穿越。
+        # 框中心在阈值线附近抖动时，单帧判定会把一次穿越记成多次（去程+回程刷计数）。
+        self.min_cross_frames = max(int(min_cross_frames or 1), 1)
+        self._pending = {}             # track_id -> (目标侧, 已连续帧数)
+        self._last_seen = {}           # track_id -> 最后出现的帧号
+        self._frame = 0
 
     @property
     def enabled(self):
         return len(self.line) == 2
 
-    def update(self, res, names):
-        """更新各 track 的所在侧；返回本帧发生的穿越事件列表（无则为 None）。"""
+    def update(self, res, names, frame_no=None):
+        """更新各 track 的所在侧；返回本帧发生的穿越事件列表（无则为 None）。
+
+        frame_no 用于淘汰"早已消失的 track"：跟踪器每次重连/换镜都会分配新 id，
+        不清理的话 prev / _last_seen 在长视频里只增不减。不传则按调用次数计龄。
+        """
+        self._frame = int(frame_no) if frame_no is not None else self._frame + 1
         if not self.enabled or res.boxes is None or not len(res.boxes):
+            self._prune()
             return None
         boxes = res.boxes
         ids = boxes.id.tolist() if boxes.id is not None else [None] * len(boxes)
@@ -101,14 +114,45 @@ class LineCounter:
                 continue
             tid = int(tid)
             prev = self.prev.get(tid)
-            self.prev[tid] = s
-            if prev is not None and prev != s:
-                direction = "in" if prev < 0 and s > 0 else "out"
-                name = names.get(cid, str(cid))
-                self.total[direction] += 1
-                self.by_class[name][direction] += 1
-                crossed.append({"track_id": tid, "class": name, "direction": direction})
+            self._last_seen[tid] = self._frame
+            if prev is None:
+                self.prev[tid] = s
+                self._pending.pop(tid, None)
+                continue
+            if s == prev:                       # 回到原侧：抖动，撤销待确认的穿越
+                self._pending.pop(tid, None)
+                continue
+            target, count = self._pending.get(tid, (s, 0))
+            if target != s:                     # 这次抖到另一侧（又换向了），重新计数
+                target, count = s, 0
+            count += 1
+            if count < self.min_cross_frames:
+                self._pending[tid] = (target, count)
+                continue
+            self.prev[tid] = s                  # 连续 N 帧在新侧 → 认定穿越
+            self._pending.pop(tid, None)
+            direction = "in" if prev < 0 and s > 0 else "out"
+            name = names.get(cid, str(cid))
+            self.total[direction] += 1
+            self.by_class[name][direction] += 1
+            crossed.append({"track_id": tid, "class": name, "direction": direction})
+        self._prune()
         return crossed or None
+
+    def _prune(self):
+        """淘汰超过 track_ttl 帧没再出现的 track，避免长视频里状态无限增长。"""
+        if not self.track_ttl or not self._last_seen:
+            return
+        cutoff = self._frame - self.track_ttl
+        stale = [t for t, seen in self._last_seen.items() if seen < cutoff]
+        for t in stale:
+            self._last_seen.pop(t, None)
+            self.prev.pop(t, None)
+            self._pending.pop(t, None)
+
+    @property
+    def active_tracks(self):
+        return len(self.prev)
 
     def draw(self, frame, color=(0, 0, 255)):
         import cv2

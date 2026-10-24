@@ -25,7 +25,8 @@ RUN pip install --index-url https://download.pytorch.org/whl/cpu torch torchvisi
 
 COPY . .
 EXPOSE 8000
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \
-    CMD python -m yolo_app check --no-video || exit 1
+# 健康检查打的是面板的 /healthz（毫秒级，读内存状态）；用 run 子命令跑批处理时请 --no-healthcheck
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s \
+    CMD curl -fsS http://127.0.0.1:8000/healthz || exit 1
 ENTRYPOINT ["python", "-m", "yolo_app"]
 CMD ["serve", "--source", "0", "--host", "0.0.0.0"]
