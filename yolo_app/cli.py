@@ -17,7 +17,7 @@ import re
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
-from .config import load_config
+from .config import ConfigError, load_config, validate_config
 from .detector import Detector
 from .logging_setup import get_logger
 from .outputs import cleanup_old, write_json
@@ -148,6 +148,9 @@ def build_parser():
     pr.add_argument('--source', required=True, help='视频文件 / 目录 / RTSP 地址')
     pr.add_argument('--show', dest='show', action='store_true', default=None, help='实时预览窗口，按 q 退出')
     pr.add_argument('--workers', type=int, help='并行进程数（目录批量时提速，>1 自动关闭预览窗口）')
+    pr.add_argument('--name-mode', dest='name_mode', choices=['stem', 'unique'],
+                    help='输出命名：stem = 源文件名（默认，同名会覆盖）；'
+                         'unique = 源文件名 + 源路径哈希（目录批量默认启用，防覆盖）')
     add_analytics(pr)
     add_common(pr)
 
@@ -211,8 +214,14 @@ def main(argv=None):
                 sv[key] = val
         ov['serve'] = sv
 
-    cfg = load_config(cfg_path, ov)
+    try:
+        cfg = load_config(cfg_path, ov)
+    except ConfigError as e:                    # 配置错误属于"用户可修"，只报错不甩栈
+        get_logger('ERROR').error(f'配置校验失败：{e}')
+        return 1
     logger = get_logger(cfg['log']['level'], cfg['log'].get('file'))
+    for w in validate_config(cfg):              # 可疑但不致命：imgsz 对齐、未知配置项等
+        logger.warning(w)
 
     if a.cmd == 'models':                       # 模型管理不需要加载模型，先拦下来
         return _models(a, cfg, logger)
@@ -225,6 +234,17 @@ def main(argv=None):
         if a.show is not None:
             cfg['run']['show'] = a.show
         sources = list_videos(a.source)
+        # 输出命名：显式 output.name 永远不改名；--name-mode 显式覆盖优先于批量自动开启
+        name_mode = getattr(a, 'name_mode', None)
+        if cfg['output'].get('name'):
+            if name_mode:
+                logger.warning(f'已显式设置 output.name={cfg["output"]["name"]}，忽略 --name-mode')
+        elif name_mode:
+            cfg['output']['name_mode'] = name_mode
+            logger.info(f'输出命名方式：{name_mode}（--name-mode 显式指定）')
+        elif len(sources) > 1:
+            cfg['output']['name_mode'] = 'unique'
+            logger.info(f'批量处理 {len(sources)} 个源，自动启用唯一输出命名（name_mode=unique），避免同名覆盖')
     elif a.cmd == 'serve':
         sources = [cfg['serve']['source']]
     else:
