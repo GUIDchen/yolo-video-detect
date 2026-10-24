@@ -1,14 +1,18 @@
 """锚点（center / bottom）与线段相交越线的回归测试。
 
-覆盖三件事：
+覆盖四件事：
   · 线段相交的几何判定：正交穿越、不穿越、端点接触、共线重叠；
   · LineCounter 新语义：一帧大跨度不漏计、冷却期内抖动不重复计、方向 in/out；
-  · analytics.anchor：bottom 取框底边中点，跨线口径与 center 明确不同。
+  · analytics.anchor：bottom 取框底边中点，跨线口径与 center 明确不同；
+  · pipeline 接线：analytics.anchor=bottom 经 process() 真实构造路径后生效。
 """
+import logging
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -37,8 +41,16 @@ class FakeBoxes:
 
 
 class FakeRes:
-    def __init__(self, boxes):
+    """pipeline 会调用 plot()，这里顺便把 Results 需要的字段补齐。"""
+
+    def __init__(self, boxes, image=None):
         self.boxes = boxes
+        self.orig_img = image
+        self.masks = None
+        self.keypoints = None
+
+    def plot(self, **kwargs):
+        return np.zeros_like(self.orig_img)
 
 
 def _res(cx, cy, tid=1):
@@ -198,6 +210,78 @@ class TestTrackTTL(unittest.TestCase):
         # 同 id 再来时只能当新 track：首帧没有 P_prev，不产生穿越
         self.assertIsNone(counter.update(_res(50, 90, tid=1), {0: 'person'}, frame_no=6))
         self.assertEqual(counter.total, {'in': 0, 'out': 0})
+
+
+class _MovingDetector:
+    """不加载模型：按调用次数返回预设框，制造确定的跨线/ROI 场景。"""
+
+    names = {0: 'person'}
+    weights = 'fake.pt'
+    track = True
+    device_name = 'cpu'
+
+    def __init__(self, boxes):
+        self.boxes = boxes
+        self.calls = 0
+
+    def infer(self, frame, imgsz=None):
+        box = self.boxes[min(self.calls, len(self.boxes) - 1)]
+        self.calls += 1
+        return FakeRes(FakeBoxes([box], [0], [1]), frame)
+
+
+def _make_video(path, frames=2, size=(100, 100)):
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*'mp4v'), 5, size)
+    if not writer.isOpened():
+        raise RuntimeError('测试视频编码器不可用')
+    for _ in range(frames):
+        writer.write(np.zeros((size[1], size[0], 3), np.uint8))
+    writer.release()
+
+
+class TestPipelineAnchorWiring(unittest.TestCase):
+    """配置里的 analytics.anchor 必须真正接到 pipeline 的组件上。
+
+    这条用例走 process() 的真实构造路径：若 pipeline 漏传 anchor，
+    bottom 会退化成 center，下面的越线计数与 ROI 过滤断言都会失败。
+    """
+
+    def _run_pipeline(self, analytics, boxes):
+        from yolo_app.pipeline import process
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            video = root / 'src.mp4'
+            _make_video(video)
+            cfg = load_config(None, {
+                'run': {'max_frames': 2},
+                'output': {'dir': str(root / 'outputs'), 'video': False, 'json': False,
+                           'events': {'enable': False, 'db': ''}},
+                'analytics': analytics,
+                'alert': {'webhook': ''},
+                'log': {'level': 'ERROR'},
+            })
+            logger = logging.getLogger('test_anchors')
+            logger.setLevel(logging.ERROR)
+            return process(str(video), cfg, _MovingDetector(boxes), logger)
+
+    def test_bottom_anchor_reaches_pipeline(self):
+        # 场景 1：中心 25→45 未跨线，底边 40→60 跨线；bottom 应计 1 次 in
+        summary = self._run_pipeline(
+            {'line': LINE, 'anchor': 'bottom'},
+            [[40, 10, 60, 40], [40, 30, 60, 60]],
+        )
+        self.assertEqual(summary['line_total'], {'in': 1, 'out': 0})
+        self.assertEqual(summary['crossings'][0]['direction'], 'in')
+
+        # 场景 2：ROI 只覆盖 y<30，中心 (50,20) 在区内、底边 (50,40) 在区外；
+        # bottom 生效时框应被 RegionFilter 剔除，center 则会保留。
+        summary = self._run_pipeline(
+            {'roi': [[0, 0], [100, 0], [100, 30], [0, 30]], 'anchor': 'bottom'},
+            [[40, 0, 60, 40]],
+        )
+        self.assertEqual(summary['frames_inferred'], 2)
+        self.assertEqual(summary['per_class_frames'], {})
 
 
 if __name__ == '__main__':
