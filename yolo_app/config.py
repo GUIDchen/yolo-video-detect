@@ -54,7 +54,8 @@ DEFAULTS = {
         'mask_roi': True,      # 有 ROI 时只统计 ROI 内的运动
         'hold_frames': 0,      # 无运动时沿用上一帧框显示多少帧（0 = 写原帧）
     },
-    'alert': {'webhook': '', 'type': 'generic', 'timeout': 5, 'dedupe_s': 3.0},
+    'alert': {'webhook': '', 'type': 'generic', 'timeout': 5, 'dedupe_s': 3.0,
+              'retry': {'max_attempts': 3, 'base_delay': 2.0}},   # 失败按 base*2^(n-1) 退避，超限置 dead
     'serve': {'host': '127.0.0.1', 'port': 8000, 'source': '0', 'quality': 80, 'token': ''},
     'output': {
         'dir': 'outputs',
@@ -64,7 +65,12 @@ DEFAULTS = {
         'segment_seconds': 0,  # >0 按时间切分录像；0 = 不分段
         'keep_days': 0,        # >0 清理超过 N 天的输出
         'max_files': 0,        # >0 只保留最近 N 个输出文件
-        'events': {'enable': True, 'classes': [0], 'min_conf': 0.6, 'cooldown_s': 2.0},
+        'events': {
+            'enable': True, 'classes': [0], 'min_conf': 0.6, 'cooldown_s': 2.0,
+            'db': 'events.db',      # 相对 output.dir；空字符串 = 不落库，退回旧行为
+            'async_write': True,    # 抓拍图后台写盘；队列满丢最旧，不拖慢主循环
+            'async_queue': 64,      # 异步写盘队列长度
+        },
     },
     'metrics': {'file': ''},   # 非空则把 Prometheus 指标同时写到该文件
     'log': {'level': 'INFO', 'interval': 30, 'file': ''},   # file 非空则同时写日志文件
