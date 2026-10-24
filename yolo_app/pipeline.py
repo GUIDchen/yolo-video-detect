@@ -207,7 +207,7 @@ def process(source, cfg, detector, logger, show=None, record=None, on_stats=None
                             queue_size=int(ev_cfg.get('async_queue', 64) or 64))
                   if ev_cfg['enable'] else None)
         a_cfg = cfg.get('analytics', {})
-        roi = RegionFilter(a_cfg.get('roi'))
+        roi = RegionFilter(a_cfg.get('roi'), anchor=a_cfg.get('anchor', 'center'))
         conf = ConfFilter(cfg['model'].get('report_conf') or 0)
         if detector.track:                  # 静止降频依赖 track_id，没开跟踪就没有意义
             stationary = StationaryGate(a_cfg.get('stationary_frames', 0),
@@ -248,7 +248,8 @@ def process(source, cfg, detector, logger, show=None, record=None, on_stats=None
             return res
         line = LineCounter(a_cfg.get('line'), resolve_class_ids(a_cfg.get('classes'), detector.names),
                            detector.names, track_ttl=a_cfg.get('track_ttl', 300),
-                           min_cross_frames=a_cfg.get('min_cross_frames', 2))
+                           min_cross_frames=a_cfg.get('min_cross_frames', 2),
+                           anchor=a_cfg.get('anchor', 'center'))
         al_cfg = cfg.get('alert', {})
         retry_cfg = al_cfg.get('retry') or {}
         max_attempts = max(int(retry_cfg.get('max_attempts', 3) or 3), 1)

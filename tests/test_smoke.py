@@ -114,42 +114,54 @@ class TestAnalytics(unittest.TestCase):
         self.assertEqual(len(kept.boxes), 1)          # 只留区域内那个
 
     def test_line_counter_counts_crossing(self):
-        counter = LineCounter([[0, 50], [100, 50]], min_cross_frames=1)   # 关防抖，逐帧判定
+        # 新语义：上一帧锚点到当前锚点的线段与计数线严格相交才计数。
+        # min_cross_frames=1 关掉计数冷却，让连续两次真实穿越都能立刻计数。
+        counter = LineCounter([[0, 50], [100, 50]], min_cross_frames=1)
         top = FakeRes(FakeBoxes([[40, 5, 60, 15]], [0], [7]))       # 框中心 y=10，线之上（- 侧）
         bottom = FakeRes(FakeBoxes([[40, 85, 60, 95]], [0], [7]))   # 中心 y=90，线之下（+ 侧）
-        counter.update(top, {0: 'person'})
-        self.assertIsNone(counter.update(top, {0: 'person'}))        # 同侧不算穿越
-        crossed = counter.update(bottom, {0: 'person'})              # 上→下 = 由 - 侧进入 + 侧 = in
+        counter.update(top, {0: 'person'})                           # 首帧只记锚点
+        self.assertIsNone(counter.update(top, {0: 'person'}))        # 同侧线段不与线相交
+        crossed = counter.update(bottom, {0: 'person'})              # 线段 10→90 穿线 = in
         self.assertEqual(crossed[0]['direction'], 'in')
         self.assertEqual(counter.total['in'], 1)
-        crossed = counter.update(top, {0: 'person'})                 # 再穿回去 = out
+        crossed = counter.update(top, {0: 'person'})                 # 线段 90→10 反向穿线 = out
         self.assertEqual(crossed[0]['direction'], 'out')
         self.assertEqual(counter.total['out'], 1)
 
 
 class TestLineDebounce(unittest.TestCase):
-    """越线防抖：抖动不该刷计数，连续 N 帧才认定穿越。"""
+    """越线冷却：同一 track 计数后 N 帧内再次相交不重复计数，用来压线附近抖动。
+
+    旧语义要求"连续 N 帧落在新侧"才计数，会漏掉一帧内的大跨度穿越；
+    新语义改为线段相交即时计数，min_cross_frames 只作为同一 track 的计数冷却。
+    """
 
     def _res(self, cy, tid=1):
         return FakeRes(FakeBoxes([[40, cy - 5, 60, cy + 5]], [0], [tid]))
 
-    def test_single_frame_flip_is_ignored_by_default(self):
-        counter = LineCounter([[0, 50], [100, 50]])          # 默认 min_cross_frames=2
-        counter.update(self._res(10), {0: 'person'})         # - 侧
-        self.assertIsNone(counter.update(self._res(90), {0: 'person'}))   # 抖到 + 侧 1 帧
-        self.assertEqual(counter.total['in'], 0)
-        self.assertIsNone(counter.update(self._res(10), {0: 'person'}))   # 抖回去，撤销
-        self.assertEqual(counter.total['in'] + counter.total['out'], 0)
-
-    def test_two_consecutive_frames_confirm_crossing(self):
-        counter = LineCounter([[0, 50], [100, 50]], min_cross_frames=2)
-        counter.update(self._res(10), {0: 'person'})
-        self.assertIsNone(counter.update(self._res(90), {0: 'person'}))
-        crossed = counter.update(self._res(90), {0: 'person'})            # 第 2 帧确认
+    def test_single_frame_jump_counts_once(self):
+        counter = LineCounter([[0, 50], [100, 50]])          # 默认冷却 2 帧
+        counter.update(self._res(10), {0: 'person'})         # 首帧 - 侧
+        crossed = counter.update(self._res(90), {0: 'person'})   # 一帧内 10→90，线段穿线
         self.assertEqual(crossed[0]['direction'], 'in')
         self.assertEqual(counter.total['in'], 1)
-        self.assertIsNone(counter.update(self._res(90), {0: 'person'}))   # 巩固不再重复计数
+
+    def test_jitter_within_cooldown_counts_once(self):
+        counter = LineCounter([[0, 50], [100, 50]])          # 默认冷却 2 帧
+        counter.update(self._res(10), {0: 'person'})         # 首帧 - 侧
+        counter.update(self._res(90), {0: 'person'})         # 穿到 + 侧，计 1 次 in
+        self.assertIsNone(counter.update(self._res(10), {0: 'person'}))   # 下一帧抖回，冷却期内不计
         self.assertEqual(counter.total['in'], 1)
+        self.assertEqual(counter.total['out'], 0)
+
+    def test_repeat_crossing_after_cooldown_counts_again(self):
+        counter = LineCounter([[0, 50], [100, 50]], min_cross_frames=2)
+        counter.update(self._res(10), {0: 'person'})         # 帧 1：首帧
+        counter.update(self._res(90), {0: 'person'})         # 帧 2：in
+        counter.update(self._res(90), {0: 'person'})         # 帧 3：同侧
+        crossed = counter.update(self._res(10), {0: 'person'})            # 帧 4：距上次计数已满 2 帧
+        self.assertEqual(crossed[0]['direction'], 'out')
+        self.assertEqual(counter.total['out'], 1)
 
 
 class TestAlerts(unittest.TestCase):

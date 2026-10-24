@@ -38,8 +38,10 @@ analytics:
   roi: []                  # ROI 多边形，如 [[100,100],[500,100],[500,400],[100,400]]，只统计区域内目标
   line: []                 # 越线计数线，如 [[0,300],[640,300]]（需配合 --track）
   classes: []              # 参与越线计数的类别；空 = 全部
+  anchor: center           # 锚点：center=框中心（现有口径）；bottom=框底边中点
+                           # 注意：改成 bottom 会改变既有越线/ROI 计数口径，需要重新标定
   track_ttl: 300           # 越线计数里 track 状态保留帧数，超时淘汰（长视频防内存增长）；0 = 不淘汰
-  min_cross_frames: 2      # 越线防抖：连续 N 帧在新侧才计一次；1 = 单帧即判定（易被抖动刷计数）
+  min_cross_frames: 2      # 越线计数冷却帧数：同一 track 计数后 N 帧内再次相交不重复计数；1 = 不冷却
   stationary_frames: 0     # 静止降频：连续 N 帧几乎不动则抽帧推理；0 = 关闭（需开 --track）
   stationary_interval: 10  # 静止状态下每多少帧推理一次
   stationary_min_move: 2   # 位移小于该像素数视为没动
