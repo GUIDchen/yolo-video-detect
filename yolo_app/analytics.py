@@ -167,6 +167,49 @@ class LineCounter:
         return {"line_total": dict(self.total), "line_by_class": {k: dict(v) for k, v in self.by_class.items()}}
 
 
+def expand_box(points, margin=0.1, width=None, height=None):
+    """多边形 → 外扩后的矩形 (x1,y1,x2,y2)，可选裁剪到画面内。
+
+    ROI 裁剪推理用它：外扩比例补偿"目标正好压在 ROI 边界被切掉"的情况。
+    """
+    xs = [float(p[0]) for p in points]
+    ys = [float(p[1]) for p in points]
+    x1, y1, x2, y2 = min(xs), min(ys), max(xs), max(ys)
+    mx, my = (x2 - x1) * float(margin), (y2 - y1) * float(margin)
+    x1, y1, x2, y2 = x1 - mx, y1 - my, x2 + mx, y2 + my
+    if width:
+        x1, x2 = max(0.0, x1), min(float(width), x2)
+    if height:
+        y1, y2 = max(0.0, y1), min(float(height), y2)
+    return int(x1), int(y1), int(x2), int(y2)
+
+
+def remap_boxes(res, dx=0, dy=0):
+    """把检测框平移回原图坐标（裁剪推理后调用）。
+
+    ultralytics 的推理结果张量带 InferenceMode 标记，原地改会抛
+    "Inplace update to inference tensor outside InferenceMode"，因此先 clone 再改。
+    """
+    boxes = getattr(res, 'boxes', None)
+    if boxes is None or not len(boxes):
+        return res
+    data = getattr(boxes, 'data', None)
+    if data is None:                    # 测试替身（FakeBoxes）只有 xyxy，直接改
+        xyxy = boxes.xyxy
+        xyxy[:, 0] += dx
+        xyxy[:, 1] += dy
+        xyxy[:, 2] += dx
+        xyxy[:, 3] += dy
+        return res
+    data = data.clone() if hasattr(data, 'clone') else data.copy()
+    boxes.data = data
+    data[:, 0] += dx
+    data[:, 1] += dy
+    data[:, 2] += dx
+    data[:, 3] += dy
+    return res
+
+
 class ConfFilter:
     """双阈值：只把置信度达标的结果交给统计/绘制，低分框仍留给跟踪器维持轨迹。
 

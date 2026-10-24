@@ -57,13 +57,14 @@ class Detector:
     def _resolve_classes(self, cls):
         return resolve_class_ids(cls, self.names)
 
-    def infer(self, frame):
+    def infer(self, frame, imgsz=None):
         """对单帧做推理；启用跟踪时同时返回带 track_id 的 Results。
 
         返回 ultralytics 的 Results，上层的统计/绘制/ROI 都基于它；
         classes=None 表示不过滤类别，half 仅在显式开启时才传给 ultralytics（8.4 起该参数已弃用）。
+        imgsz 非空时覆盖配置值（ROI 裁剪推理用小尺寸换速度）。
         """
-        kw = dict(conf=self.conf, iou=self.iou, imgsz=self.imgsz, device=self.device,
+        kw = dict(conf=self.conf, iou=self.iou, imgsz=imgsz or self.imgsz, device=self.device,
                   classes=self.classes, verbose=False)
         if self.half:                       # ultralytics 8.4 起 half 已标记 deprecated，仅在需要时才传
             kw['half'] = True

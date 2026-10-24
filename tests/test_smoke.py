@@ -753,6 +753,54 @@ class TestMotionIntegration(unittest.TestCase):
         self.assertGreater(s['skip_reasons']['motion'], 0)
 
 
+class TestRoiCropGeometry(unittest.TestCase):
+    """ROI 裁剪的几何部分：外扩、裁剪、坐标平移。"""
+
+    def test_expand_box_with_margin(self):
+        from yolo_app.analytics import expand_box
+        self.assertEqual(expand_box([[100, 100], [200, 100], [200, 200], [100, 200]], 0.1),
+                         (90, 90, 210, 210))
+
+    def test_expand_box_clipped_to_frame(self):
+        from yolo_app.analytics import expand_box
+        self.assertEqual(expand_box([[0, 0], [50, 0], [50, 50], [0, 50]], 0.5, width=40, height=40),
+                         (0, 0, 40, 40))
+
+    def test_expand_box_no_margin(self):
+        from yolo_app.analytics import expand_box
+        self.assertEqual(expand_box([[10, 10], [20, 20]], 0), (10, 10, 20, 20))
+
+    def test_remap_boxes_shifts_in_place(self):
+        from yolo_app.analytics import remap_boxes
+        res = FakeRes(FakeBoxes([[0, 0, 10, 10]], [0]))
+        remap_boxes(res, 100, 50)
+        self.assertEqual(res.boxes.xyxy.tolist(), [[100.0, 50.0, 110.0, 60.0]])
+
+    def test_remap_handles_empty(self):
+        from yolo_app.analytics import remap_boxes
+        res = FakeRes(FakeBoxes([], []))
+        self.assertIs(remap_boxes(res, 10, 10), res)
+
+
+class TestRoiCropIntegration(unittest.TestCase):
+    def test_cropped_run_detects_inside_roi(self):
+        if not (ROOT / 'weights' / 'yolo11n.pt').exists():
+            self.skipTest('缺少 weights/yolo11n.pt')
+        from yolo_app.detector import Detector
+        from yolo_app.logging_setup import get_logger
+        from yolo_app.pipeline import process
+
+        cfg = load_config(None, {'run': {'max_frames': 3},
+                                 'output': {'video': False, 'json': False,
+                                            'events': {'enable': False}},
+                                 'analytics': {'roi': [[0, 0], [320, 0], [320, 240], [0, 240]],
+                                               'roi_crop': True, 'roi_imgsz': 320}})
+        summary = process(str(ensure_test_video()), cfg, Detector(cfg), get_logger('ERROR'))
+        self.assertEqual(summary['frames_inferred'], 3)
+        if REAL_FIXTURE:                       # 只有真实场景素材才断言检出了目标
+            self.assertGreater(sum(summary['per_class_frames'].values()), 0)
+
+
 class TestWebApp(unittest.TestCase):
     """/healthz 与 token 鉴权：面板对外暴露时这两条是底线。"""
 

@@ -43,6 +43,9 @@ analytics:
   stationary_frames: 0     # 静止降频：连续 N 帧几乎不动则抽帧推理；0 = 关闭（需开 --track）
   stationary_interval: 10  # 静止状态下每多少帧推理一次
   stationary_min_move: 2   # 位移小于该像素数视为没动
+  roi_crop: false          # 只裁 ROI 区域做推理（目标都在 ROI 内时更快更准；需先设 roi）
+  roi_margin: 0.1          # 裁剪外扩比例，避免目标压在边界被切断
+  roi_imgsz: 0             # 裁剪推理的输入尺寸；0 = 沿用 model.imgsz
 
 motion:                   # 运动门控：先用帧差筛一遍，没动就不推理（单机 CPU 最划算的优化）
   enable: false           # 默认关闭；静态场景多时打开可省 60%+ 算力

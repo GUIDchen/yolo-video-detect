@@ -42,6 +42,9 @@ DEFAULTS = {
         'stationary_frames': 0,   # 静止降频：连续 N 帧几乎不动就开始抽帧推理；0 = 关闭（需开跟踪）
         'stationary_interval': 10,  # 静止后每多少帧推理一次
         'stationary_min_move': 2,   # 位移小于该像素数视为"没动"
+        'roi_crop': False,        # 只对 ROI 区域裁剪后推理（目标都在 ROI 内时又快又准）
+        'roi_margin': 0.1,        # 裁剪外扩比例，避免目标压在 ROI 边界被切
+        'roi_imgsz': 0,           # 裁剪推理的输入尺寸；0 = 沿用 model.imgsz
     },
     'motion': {
         'enable': False,       # 帧差门控：无运动不推理（静态场景省算力；光照突变会退化成逐帧）

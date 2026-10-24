@@ -15,7 +15,7 @@ from pathlib import Path
 import cv2
 
 from .alerts import AlertChannel
-from .analytics import ConfFilter, LineCounter, RegionFilter, StationaryGate
+from .analytics import ConfFilter, LineCounter, RegionFilter, StationaryGate, expand_box, remap_boxes
 from .detector import resolve_class_ids
 from .motion import MotionGate, overlay_boxes
 from .outputs import EventSink, VideoSink, write_json
@@ -113,6 +113,33 @@ def process(source, cfg, detector, logger, show=None, record=None, on_stats=None
                                 m_cfg.get('blur', 5),
                                 a_cfg.get('roi') if m_cfg.get('mask_roi', True) else None)
         hold_frames = int(m_cfg.get('hold_frames', 0) or 0)
+
+        crop_cfg = None
+        if a_cfg.get('roi_crop') and roi.enabled:
+            crop_cfg = {'margin': float(a_cfg.get('roi_margin', 0.1) or 0),
+                        'imgsz': int(a_cfg.get('roi_imgsz') or 0), 'box': None, 'off': False}
+
+        def infer_frame(frame):
+            """ROI 裁剪推理：裁 → 小尺寸推理 → 平移回原图；不支持的任务自动退回全图。"""
+            if crop_cfg is None or crop_cfg['off']:
+                return detector.infer(frame)
+            if crop_cfg['box'] is None:
+                crop_cfg['box'] = expand_box(roi.roi, crop_cfg['margin'],
+                                             frame.shape[1], frame.shape[0])
+                x1, y1, x2, y2 = crop_cfg['box']
+                if x2 - x1 < 16 or y2 - y1 < 16:      # ROI 退化成一个点，裁了没意义
+                    crop_cfg['off'] = True
+                    return detector.infer(frame)
+            x1, y1, x2, y2 = crop_cfg['box']
+            res = detector.infer(frame[y1:y2, x1:x2], imgsz=crop_cfg['imgsz'] or None)
+            if getattr(res, 'masks', None) is not None or getattr(res, 'keypoints', None) is not None:
+                logger.warning('ROI 裁剪只支持检测框，遇到分割/姿态结果，已退回全图推理')
+                crop_cfg['off'] = True
+                return detector.infer(frame)
+            remap_boxes(res, x1, y1)
+            res.orig_img = frame
+            res.orig_shape = frame.shape[:2]
+            return res
         line = LineCounter(a_cfg.get('line'), resolve_class_ids(a_cfg.get('classes'), detector.names),
                            detector.names, track_ttl=a_cfg.get('track_ttl', 300),
                            min_cross_frames=a_cfg.get('min_cross_frames', 2))
@@ -127,6 +154,7 @@ def process(source, cfg, detector, logger, show=None, record=None, on_stats=None
                     f'{" | 静止降频 " + str(stationary.interval) + "帧" if stationary.enabled else ""}'
                     f'{" | 告警已启用" if alert.enabled else ""}'
                     f'{" | 运动门控" if motion is not None else ""}'
+                    f'{" | ROI 裁剪推理" if crop_cfg is not None else ""}'
                     f'{" | 读取 " + src.backend if src.backend != "opencv" else ""}')
 
         while True:
@@ -174,7 +202,7 @@ def process(source, cfg, detector, logger, show=None, record=None, on_stats=None
 
             # 4) 推理（可选跟踪）→ 5) ROI 过滤：区域外的框直接剔除，后续统计/绘制都看不到
             t_infer = time.perf_counter()
-            res = conf.keep(roi.keep(detector.infer(frame)))    # 先 ROI 后置信度：ROI 更便宜
+            res = conf.keep(roi.keep(infer_frame(frame)))       # 先 ROI 后置信度：ROI 更便宜
             last_res = res
             cost_ms = (time.perf_counter() - t_infer) * 1000
             infer_total += cost_ms
