@@ -60,6 +60,9 @@ alert:
   type: generic            # generic | wecom | feishu
   timeout: 5
   dedupe_s: 3.0            # 相同告警文本的静默窗口（秒），0 = 不去重
+  retry:                   # 告警 outbox：失败按指数退避重试
+    max_attempts: 3        # 最多尝试次数，超限置 dead（不删除，可人工排查）
+    base_delay: 2.0        # 首次重试间隔秒；第 n 次失败后等待 base*2^(n-1)
 
 output:
   dir: outputs             # 结果目录
@@ -69,11 +72,14 @@ output:
   segment_seconds: 0       # >0 按秒数切分录像（长时录制用）
   keep_days: 0             # >0 自动清理超过 N 天的输出
   max_files: 0             # >0 只保留最近 N 个输出文件
-  events:                  # 告警抓拍
+  events:                  # 告警抓拍 + 事件落库
     enable: true
     classes: [0]           # 触发抓拍的类别（默认人）
     min_conf: 0.6
     cooldown_s: 2.0        # 同一告警冷却时间
+    db: events.db          # SQLite 事件库，相对 output.dir；'' = 不落库（退回旧行为）
+    async_write: true      # 抓拍图后台写盘，慢磁盘不拖慢检测
+    async_queue: 64        # 异步写盘队列长度；满时丢最旧并计入 dropped_images
 
 serve:                     # Web 面板
   host: 127.0.0.1
