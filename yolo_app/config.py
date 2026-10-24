@@ -43,6 +43,14 @@ DEFAULTS = {
         'stationary_interval': 10,  # 静止后每多少帧推理一次
         'stationary_min_move': 2,   # 位移小于该像素数视为"没动"
     },
+    'motion': {
+        'enable': False,       # 帧差门控：无运动不推理（静态场景省算力；光照突变会退化成逐帧）
+        'threshold': 25,       # 帧差阈值
+        'min_area_ratio': 0.002,  # 运动像素占比达到多少才算"有运动"
+        'blur': 5,             # 高斯模糊核，压噪点；<=1 关闭
+        'mask_roi': True,      # 有 ROI 时只统计 ROI 内的运动
+        'hold_frames': 0,      # 无运动时沿用上一帧框显示多少帧（0 = 写原帧）
+    },
     'alert': {'webhook': '', 'type': 'generic', 'timeout': 5, 'dedupe_s': 3.0},
     'serve': {'host': '127.0.0.1', 'port': 8000, 'source': '0', 'quality': 80, 'token': ''},
     'output': {

@@ -685,6 +685,74 @@ class TestVideoSourceFacade(unittest.TestCase):
             src.release()
 
 
+class TestMotionGate(unittest.TestCase):
+    """运动门控：没动就不推理；ROI 外运动忽略。"""
+
+    def test_static_frames_have_no_motion(self):
+        from yolo_app.motion import MotionGate
+        gate = MotionGate(threshold=20, min_area_ratio=0.001, blur=0)
+        frame = np.zeros((120, 160, 3), np.uint8)
+        self.assertTrue(gate.update(frame))            # 首帧没有参照，必须推理
+        for _ in range(5):
+            self.assertFalse(gate.update(frame))
+
+    def test_moving_object_detected(self):
+        from yolo_app.motion import MotionGate
+        gate = MotionGate(threshold=20, min_area_ratio=0.001, blur=0)
+        a = np.zeros((120, 160, 3), np.uint8)
+        gate.update(a)
+        b = a.copy()
+        b[40:80, 40:80] = 255
+        self.assertTrue(gate.update(b))
+
+    def test_roi_mask_ignores_outside_motion(self):
+        from yolo_app.motion import MotionGate
+        gate = MotionGate(threshold=20, min_area_ratio=0.001, blur=0,
+                          roi=[[0, 0], [50, 0], [50, 120], [0, 120]])
+        a = np.zeros((120, 160, 3), np.uint8)
+        gate.update(a)
+        outside = a.copy()
+        outside[40:80, 120:150] = 255                  # ROI 外运动
+        self.assertFalse(gate.update(outside))
+        inside = outside.copy()
+        inside[40:80, 10:40] = 255                     # ROI 内运动
+        self.assertTrue(gate.update(inside))
+
+    def test_overlay_boxes_does_not_mutate_source(self):
+        from yolo_app.motion import overlay_boxes
+        frame = np.zeros((60, 60, 3), np.uint8)
+        out = overlay_boxes(frame, FakeRes(FakeBoxes([[10, 10, 40, 40]], [0])))
+        self.assertTrue((out != frame).any())
+        self.assertFalse((frame != 0).any())
+
+
+class TestMotionIntegration(unittest.TestCase):
+    def test_static_video_skips_most_inference(self):
+        if not (ROOT / 'weights' / 'yolo11n.pt').exists():
+            self.skipTest('缺少 weights/yolo11n.pt')
+        import tempfile
+
+        from yolo_app.detector import Detector
+        from yolo_app.logging_setup import get_logger
+        from yolo_app.pipeline import process
+
+        path = Path(tempfile.gettempdir()) / '_static_motion.mp4'
+        vw = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*'mp4v'), 25, (160, 120))
+        for _ in range(30):
+            vw.write(np.zeros((120, 160, 3), np.uint8))
+        vw.release()
+        cfg = load_config(None, {'motion': {'enable': True},
+                                 'output': {'video': False, 'json': False,
+                                            'events': {'enable': False}}})
+        try:
+            s = process(str(path), cfg, Detector(cfg), get_logger('ERROR'))
+        finally:
+            path.unlink(missing_ok=True)
+        self.assertGreaterEqual(s['frames_inference_skipped'], 20)
+        self.assertLessEqual(s['frames_inferred'], 5)
+        self.assertGreater(s['skip_reasons']['motion'], 0)
+
+
 class TestWebApp(unittest.TestCase):
     """/healthz 与 token 鉴权：面板对外暴露时这两条是底线。"""
 

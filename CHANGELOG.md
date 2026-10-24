@@ -20,6 +20,12 @@
 - Dockerfile 安装 `ffmpeg`（约 +100MB）；不想要可设 `run.reader: opencv`。
 - summary 新增 `reader`、`frames_dropped`；指标新增 `yolo_frames_dropped_total`。
 
+### 新增（运动门控）
+- **`yolo_app/motion.py`**：帧差 + 高斯模糊 + 形态学开运算 + 可选 ROI 掩码，判断"画面有没有动"。
+- 配置 `motion.enable/threshold/min_area_ratio/blur/mask_roi/hold_frames`（默认关闭）；
+  `hold_frames > 0` 时无运动帧沿用上一帧框显示，避免画面突然空白。
+- 实测 `data/test.mp4`（有运动）跳过 0 帧；静态视频 75 帧只推理 1 次（跳过 74 帧）。
+
 ## v0.5.0 — 健壮性与可观测性（对照 Frigate/supervision 的差距分析）
 
 ### 修复（会直接造成线上事故的路径）

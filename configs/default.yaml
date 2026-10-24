@@ -44,6 +44,14 @@ analytics:
   stationary_interval: 10  # 静止状态下每多少帧推理一次
   stationary_min_move: 2   # 位移小于该像素数视为没动
 
+motion:                   # 运动门控：先用帧差筛一遍，没动就不推理（单机 CPU 最划算的优化）
+  enable: false           # 默认关闭；静态场景多时打开可省 60%+ 算力
+  threshold: 25           # 帧差阈值
+  min_area_ratio: 0.002   # 运动面积占比达到该值才算有运动
+  blur: 5                 # 高斯模糊核（压噪点），<=1 关闭
+  mask_roi: true          # 有 ROI 时只看 ROI 内的运动
+  hold_frames: 0          # 无运动时沿用上一帧框显示多少帧
+
 alert:
   webhook: ''              # 企业微信/飞书机器人 key，或任意接收 JSON 的 URL
   type: generic            # generic | wecom | feishu

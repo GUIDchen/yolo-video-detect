@@ -17,6 +17,7 @@ import cv2
 from .alerts import AlertChannel
 from .analytics import ConfFilter, LineCounter, RegionFilter, StationaryGate
 from .detector import resolve_class_ids
+from .motion import MotionGate, overlay_boxes
 from .outputs import EventSink, VideoSink, write_json
 from .sources import VideoSource, is_camera
 
@@ -70,6 +71,8 @@ def process(source, cfg, detector, logger, show=None, record=None, on_stats=None
     video_path = output_paths(cfg, source)
     sink = events = roi = line = alert = conf = None
     stationary = StationaryGate(0)          # 未启用时当作"永远需要推理"
+    motion = None
+    hold_left = 0
     hits, ids, crossings = Counter(), set(), []
     idx = done = skipped = skip_stationary = skip_motion = 0
     interrupted = False
@@ -104,6 +107,12 @@ def process(source, cfg, detector, logger, show=None, record=None, on_stats=None
             stationary = StationaryGate(a_cfg.get('stationary_frames', 0),
                                         a_cfg.get('stationary_interval', 10),
                                         a_cfg.get('stationary_min_move', 2))
+        m_cfg = cfg.get('motion', {})
+        if m_cfg.get('enable'):
+            motion = MotionGate(m_cfg.get('threshold', 25), m_cfg.get('min_area_ratio', 0.002),
+                                m_cfg.get('blur', 5),
+                                a_cfg.get('roi') if m_cfg.get('mask_roi', True) else None)
+        hold_frames = int(m_cfg.get('hold_frames', 0) or 0)
         line = LineCounter(a_cfg.get('line'), resolve_class_ids(a_cfg.get('classes'), detector.names),
                            detector.names, track_ttl=a_cfg.get('track_ttl', 300),
                            min_cross_frames=a_cfg.get('min_cross_frames', 2))
@@ -117,6 +126,7 @@ def process(source, cfg, detector, logger, show=None, record=None, on_stats=None
                     f'{" | 双阈值 " + str(conf.min_conf) if conf.enabled else ""}'
                     f'{" | 静止降频 " + str(stationary.interval) + "帧" if stationary.enabled else ""}'
                     f'{" | 告警已启用" if alert.enabled else ""}'
+                    f'{" | 运动门控" if motion is not None else ""}'
                     f'{" | 读取 " + src.backend if src.backend != "opencv" else ""}')
 
         while True:
@@ -136,6 +146,21 @@ def process(source, cfg, detector, logger, show=None, record=None, on_stats=None
                 if sink:
                     sink.write(frame)           # 跳过的帧原样写出，保持时长一致
                 continue
+
+            # 运动门控：帧差先筛一遍，没动就跳过推理（默认关闭）
+            if motion is not None and not motion.update(frame):
+                skip_motion += 1
+                out = frame
+                if hold_frames and last_res is not None and hold_left < hold_frames:
+                    out = overlay_boxes(frame, last_res)      # 沿用上一帧框，避免画面突然空白
+                    hold_left += 1
+                if sink:
+                    sink.write(out)
+                if on_frame:
+                    on_frame(out)
+                emit_stats()
+                continue
+            hold_left = 0
 
             # 静止降频：有跟踪且所有目标都不动时，按 interval 抽帧推理（默认关闭）
             if stationary.enabled and not stationary.should_infer(last_res, idx):
