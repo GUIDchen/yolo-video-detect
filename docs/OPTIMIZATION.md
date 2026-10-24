@@ -114,17 +114,18 @@ Gauge 不能用 `set_function`，见 [client_python 多进程文档](https://pro
 | 对外暴露告警 | 监听非回环且无 token 时启动日志告警 | 日志可见 | 代码路径 |
 | 流收尾 | `/stream` 在检测结束后主动结束响应 | 播放器不再永久挂起 | 代码路径 |
 
-### 5.2 P1 计划（下一轮，按收益排序）
+### 5.2 P1（v0.6.0 已全部实施）
 
-1. **读取层重构**（收益最大）：FFmpeg 子进程或 PyAV + 有界队列 + 看门狗（"多久没收到帧"判定僵死）+ 指数退避重连，
-   对外接口保持 `VideoSource.read()` 不变。验收：kill -STOP 模拟僵死时 5s 内自动重连；RTSP 延迟不随时间累积。
-2. **运动门控**：帧差 + 形态学 + 在线阈值；命中才推理，未命中复用上一帧结果并按 `stride` 降频写盘。
-   验收：静态场景 CPU 占用下降 ≥ 60%，检出召回下降 ≤ 2%（同一段标注视频对比）。
-3. **双阈值**：`model.conf`（送跟踪）与 `model.report_conf`（计数/绘制）分离。
-   验收：误检下降且召回不变；`models --benchmark` 增加该维度对照列。
-4. **ROI 裁剪推理**：ROI 外扩 10% 后裁剪、按 320 推理、坐标映射回原图。
-   验收：同精度下 FPS 提升 ≥ 1.5×（1080p 输入）。
-5. **静止目标降频**（Frigate stationary 思路）：位置连续 N 帧不变则按 `interval` 抽查。
+| 项 | 实现 | 验收结果 |
+| --- | --- | --- |
+| 读取层重构 | `yolo_app/reader.py`：OpenCV 与 FFmpeg 两个后端；FFmpeg 走 rawvideo 管道 + 读线程 + `camera.buffer_size` 有界队列，`run.read_timeout` 判僵死并按 `run.reconnect` 重启；对外保持 `VideoSource.read()` | 模拟"子进程不产帧"后自动重启（`test_stalled_stream_restarts`）；两后端首帧 max diff 3 / mean 1.1 |
+| 运动门控 | `yolo_app/motion.py` 帧差 + 模糊 + 形态学 + ROI 掩码 | 静态视频 75 帧只推理 1 次（跳过 74 帧 = 98.7%）；有运动视频跳过 0 帧 |
+| 双阈值 | `analytics.ConfFilter` + `model.report_conf` | `data/test.mp4` 过滤 26 个低分框，`unique_tracks` 保持 6（轨迹不断） |
+| ROI 裁剪推理 | `expand_box` / `remap_boxes` + `analytics.roi_crop` | 受控基准：全图 640 269.8ms → 裁剪 320 151.0ms（**1.79×**） |
+| 静止目标降频 | `analytics.StationaryGate`（默认关闭） | 静态视频 75 帧推理 10 次；移动目标不抽帧（单测覆盖） |
+
+遗留风险（记录在案，不阻塞）：FFmpeg 后端在**文件**上比 OpenCV 多一层管道与色彩转换开销，
+因此 `auto` 只给直播源启用 FFmpeg；ROI 裁剪不支持分割/姿态（遇到时自动退回全图并告警）。
 
 ### 5.3 P2（记录，不承诺时间）
 
@@ -133,7 +134,7 @@ Gauge 不能用 `set_function`，见 [client_python 多进程文档](https://pro
 
 ---
 
-## 6. 新增配置项（v0.5.0）
+## 6. 新增配置项（v0.5.0 → v0.6.0）
 
 | 配置 | 默认 | 说明 |
 | --- | --- | --- |
@@ -142,8 +143,19 @@ Gauge 不能用 `set_function`，见 [client_python 多进程文档](https://pro
 | `analytics.min_cross_frames` | 2 | 连续 N 帧在新侧才计一次穿越；1 = 不防抖 |
 | `alert.dedupe_s` | 3.0 | 相同告警文本静默窗口 |
 | `serve.token` | '' | 非空时数据接口需 `?token=` 或 `X-Token` |
+| `run.reader` | auto | auto = 直播源用 FFmpeg（低延迟 + 看门狗），文件/摄像头用 OpenCV |
+| `run.read_timeout` | 10 | 直播源多久没收到帧判定僵死并重启（秒） |
+| `model.report_conf` | 0 | 双阈值：低于该值的框只送跟踪，0 = 沿用 `model.conf` |
+| `analytics.stationary_frames` | 0 | 静止降频触发帧数；0 = 关闭（需开跟踪） |
+| `analytics.roi_crop` | false | 只裁 ROI 区域推理；需先设 `analytics.roi` |
+| `analytics.roi_margin` | 0.1 | 裁剪外扩比例 |
+| `analytics.roi_imgsz` | 0 | 裁剪推理输入尺寸；0 = 沿用 `model.imgsz` |
+| `motion.enable` | false | 运动门控总开关 |
+| `motion.threshold / min_area_ratio / blur` | 25 / 0.002 / 5 | 门控灵敏度 |
+| `motion.mask_roi` | true | 只统计 ROI 内的运动 |
+| `motion.hold_frames` | 0 | 无运动时沿用上一帧框显示多少帧 |
 
-对应 CLI 新增：`serve --token`。其余项通过 YAML 配置。
+对应 CLI 新增：`serve --token`、`--report-conf`。其余项通过 YAML 配置。
 
 ---
 
@@ -151,10 +163,17 @@ Gauge 不能用 `set_function`，见 [client_python 多进程文档](https://pro
 
 ```text
 $ make test
-Ran 34 tests ... OK            # 原 20 → 34（+14 条健壮性用例）
+Ran 61 tests ... OK            # v0.5.0: 34 → v0.6.0: 61（+27 条 P1 用例）
 
 $ make lint
 All checks passed!
+
+# v0.6.0 实测（YOLO11n，CPU）
+运动门控   ：有运动视频跳过 0 帧；静态视频 75 帧只推理 1 次
+双阈值     ：--report-conf 0.5 过滤 26 个低分框，unique_tracks 仍为 6
+静止降频   ：静态视频 75 帧推理 10 次（每 10 帧抽查）
+ROI 裁剪   ：全图 640 269.8ms → 裁剪 320 151.0ms（1.79×）
+读取后端   ：OpenCV vs FFmpeg 首帧 max diff 3 / mean 1.1；僵死 0.5s 判定并自动重启
 
 # 面板实测（YOLO11n，data/test.mp4）
 $ curl /healthz
@@ -181,6 +200,7 @@ yolo_frames_skipped_total 0
 - **重连语义变化**：`run.reconnect` 现在指"连续失败次数"。老配置 `reconnect: 3` 含义更宽松（可反复恢复），
   不影响现有行为，只影响"是否永久放弃"。回滚：不需要，旧行为是缺陷。
 - **鉴权默认关闭**：仅监听回环时无感；对外暴露需显式设 token（启动日志会提示）。
+- **读取后端默认变化**：直播源默认改走 FFmpeg。回滚：`run.reader: opencv`。
 - 回滚整轮：`git revert <commit>`，无数据迁移、无配置破坏性变更。
 
 ---

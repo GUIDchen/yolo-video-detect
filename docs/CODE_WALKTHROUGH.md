@@ -5,6 +5,10 @@
 >
 > 阅读顺序建议：**pipeline → detector → sources → analytics → outputs → config → cli → 其余**。
 > 带 ★ 的是核心链路，其余是辅助模块。
+>
+> **v0.6.0 说明**：本文写于 v0.5.x，尚未覆盖新增的 `reader.py`（OpenCV/FFmpeg 双读取后端）与
+> `motion.py`（运动门控）；这两个模块的设计与数据流见 [ARCHITECTURE.md](ARCHITECTURE.md)，
+> 行内注释也已写清取舍。其余模块的逐行讲解仍然有效。
 
 ## 0. 先建立全局印象
 

@@ -22,6 +22,10 @@
 | Web 面板（MJPEG + WebSocket + Prometheus） | `python -m yolo_app serve` |
 | 面板鉴权 / 健康检查 / 优雅停机 | `serve --token` · `/healthz` · SIGTERM 自动收尾 |
 | 越线防抖 + 轨迹回收 | `analytics.min_cross_frames` / `analytics.track_ttl` |
+| 双阈值（低分框只送跟踪） | `--report-conf 0.5` |
+| 运动门控（没动不推理） | `motion.enable: true` |
+| ROI 裁剪推理（快 1.8×） | `analytics.roi_crop: true` + `roi_imgsz: 320` |
+| 直播源 FFmpeg 后端 + 僵死看门狗 | `run.reader: auto` / `run.read_timeout: 10` |
 | 录像分段 / 留存清理 | `--segment-seconds 300 --keep-days 7 --max-files 200` |
 | 模型管理（清单/下载/对照切换） | `python -m yolo_app models [--download ...] [--benchmark]` |
 | 模型导出（ONNX/TensorRT/OpenVINO…） | `python -m yolo_app export --format onnx` |
@@ -168,6 +172,7 @@ $ python -m yolo_app run --source data/test.mp4 --track --max-frames 5 --out-dir
 | `--keep-days` / `--max-files` | 输出留存清理 |
 | `--workers` | 目录批量的并行进程数 |
 | `--token` | `serve` 面板访问 token；设置后 /stats /metrics /stream /ws 需带 `?token=` |
+| `--report-conf` | 双阈值：低于该值的框只送跟踪，不进统计/绘制/抓拍（默认沿用 `--conf`） |
 
 ## 业务后处理：ROI 与越线计数
 
@@ -387,7 +392,7 @@ make yolo-env                                 # 看当前生效的版本与导�
 make install-wheel                            # 切回官方 wheel 基线（ultralytics 8.4.152）
 ```
 
-`install-src` 做三件事：editable 安装源码、把 `ultralytics-thop` 升到 `>=2.2.3`、`ultralytics-platform` 升到 `>=0.1.45`，最后打印生效版本。editable 安装后改 `.py` 立即生效，不必重装；源码模式下 `make test` 的 20 个用例同样全绿。它用 `--no-deps --no-build-isolation` 安装，要求 venv 内已有 setuptools（`make install` 装依赖时已带入）。
+`install-src` 做三件事：editable 安装源码、把 `ultralytics-thop` 升到 `>=2.2.3`、`ultralytics-platform` 升到 `>=0.1.45`，最后打印生效版本。editable 安装后改 `.py` 立即生效，不必重装；源码模式下 `make test` 的用例同样全绿。它用 `--no-deps --no-build-isolation` 安装，要求 venv 内已有 setuptools（`make install` 装依赖时已带入）。
 
 三个坑：
 
@@ -395,11 +400,11 @@ make install-wheel                            # 切回官方 wheel 基线（ultr
 - **源码目录不能挪**：`site-packages/__editable__.ultralytics-8.4.187.pth` 存的是绝对路径，换位置后必须重跑 `make install-src`。
 - **thop 必须跟着升**：`ultralytics 8.4.187` 起 `get_flops()` 给 `thop.profile()` 传了 `stride=` / `min_cells=`，旧的 `ultralytics-thop 2.1.6` 抛异常后被 `except` 吞掉，`model.info()` 静默显示 `0.0 GFLOPs`；升到 2.2.3 后正常显示 `6.7 GFLOPs`。
 
-## 实测记录（Apple Silicon，CPU 推理；ultralytics 8.4.152 / torch 2.14.0）
+## 实测记录（Apple Silicon，CPU 推理；ultralytics 8.4.x / torch 2.14.0）
 
 ```
 $ python -m unittest discover -s tests
-Ran 34 tests ... OK
+Ran 61 tests ... OK
 $ ruff check yolo_app tests scripts
 All checks passed!
 
@@ -413,6 +418,12 @@ $ python -m yolo_app camera --record --no-show --max-frames 60 --width 640 --hei
 
 $ python -m yolo_app export --format onnx --simplify && python -m yolo_app check --model yolo11n.onnx
 导出完成: weights/yolo11n.onnx (10MB) | 自检通过 ✅（ONNX Runtime 1.30.0 CPU）
+
+$ python -m yolo_app run --source data/test.mp4                # 运动门控（motion.enable: true）
+有运动场景跳过 0 帧；静态合成视频 75 帧只推理 1 次（跳过 74 帧）
+
+$ # ROI 裁剪推理（analytics.roi_crop: true, roi_imgsz: 320；单进程受控基准）
+全图 640 推理 269.8ms → 裁剪 320 推理 151.0ms（1.79×）
 
 $ python -m yolo_app serve --source 0     # 面板
 /stats → {"frames":8,"fps":0.6,"per_class":{"person":24,"bus":8}} · /ws 推送正常 · /metrics 200 · /stream MJPEG 正常

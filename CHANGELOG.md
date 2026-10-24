@@ -1,14 +1,20 @@
 # 变更记录
 
-## 未发布 — v0.6.0（P1 优化）
+## v0.6.0 — P1 优化（读取层 / 运动门控 / 双阈值 / ROI 裁剪）
 
 ### 新增
+- **运动门控**（`yolo_app/motion.py`）：帧差 + 高斯模糊 + 形态学开运算 + 可选 ROI 掩码，判断"画面有没有动"。
+  配置 `motion.enable/threshold/min_area_ratio/blur/mask_roi/hold_frames`（默认关闭）；`hold_frames > 0` 时
+  无运动帧沿用上一帧框显示，避免画面突然空白。实测：有运动视频跳过 0 帧，静态视频 75 帧只推理 1 次。
 - **双阈值**：`model.report_conf`（CLI `--report-conf`）。低于该值的框只送跟踪器、不进统计/绘制/抓拍/越线，
   跟踪阈值仍是 `model.conf`，轨迹不会因为提高显示阈值而断。
 - **静止降频**：`analytics.stationary_frames / stationary_interval / stationary_min_move`（默认关闭）。
   开着跟踪时，所有轨迹连续 N 帧几乎不动就按 interval 抽帧推理；实测静态视频推理帧数 75 → 10。
-- summary 新增 `frames_inference_skipped`、`skip_reasons`、`boxes_low_conf`；
-  指标新增 `yolo_inference_skipped_total{reason="stationary"|"motion"}`。
+- **ROI 裁剪推理**：`analytics.roi_crop / roi_margin / roi_imgsz`（默认关闭）。按 ROI 外扩裁剪后用
+  小尺寸推理，再把框平移回原图；遇到分割/姿态结果自动退回全图并告警。
+  实测 `data/test.mp4`：全图 640 推理 270ms → 裁剪 320 推理 151ms（**1.79×**）。
+- summary 新增 `frames_inference_skipped`、`skip_reasons`、`boxes_low_conf`、`reader`、`frames_dropped`；
+  指标新增 `yolo_inference_skipped_total{reason}`、`yolo_frames_dropped_total`。
 
 ### 变更
 - **读取层拆出 `yolo_app/reader.py`**：`OpenCVReader`（文件/摄像头）与 `FFmpegReader`（直播源）。
@@ -16,15 +22,14 @@
   后台读线程 + `camera.buffer_size` 有界队列（队满丢最旧帧并计数），`run.read_timeout` 判僵死后按
   `run.reconnect` 语义重启。`VideoSource` 变成门面，新增 `opened/width/height/dropped/backend`。
 - 新增配置 `run.reader`（auto|opencv|ffmpeg，默认 auto）与 `run.read_timeout`（默认 10s）；
-  auto 仅对 RTSP/RTMP/HTTP 直播源启用 FFmpeg，文件与摄像头仍走 OpenCV。
+  auto 仅对 RTSP/RTMP/HTTP 直播源启用 FFmpeg，文件与摄像头仍走 OpenCV（可用 `run.reader` 强制）。
 - Dockerfile 安装 `ffmpeg`（约 +100MB）；不想要可设 `run.reader: opencv`。
-- summary 新增 `reader`、`frames_dropped`；指标新增 `yolo_frames_dropped_total`。
+- 版本号 0.5.0 → 0.6.0；测试 34 → **61**。
 
-### 新增（运动门控）
-- **`yolo_app/motion.py`**：帧差 + 高斯模糊 + 形态学开运算 + 可选 ROI 掩码，判断"画面有没有动"。
-- 配置 `motion.enable/threshold/min_area_ratio/blur/mask_roi/hold_frames`（默认关闭）；
-  `hold_frames > 0` 时无运动帧沿用上一帧框显示，避免画面突然空白。
-- 实测 `data/test.mp4`（有运动）跳过 0 帧；静态视频 75 帧只推理 1 次（跳过 74 帧）。
+### 验证
+- `make test` 61 个用例全绿，`ruff` 通过。
+- 两后端首帧对比：max diff 3、mean 1.1（仅色彩转换舍入差异）。
+- 单进程受控基准（同机、CPU）：全图 640 270ms vs 裁剪 320 151ms。
 
 ## v0.5.0 — 健壮性与可观测性（对照 Frigate/supervision 的差距分析）
 

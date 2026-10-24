@@ -33,8 +33,10 @@
 | `yolo_app/cli.py` | 命令行入口、参数解析、子命令分发、多进程调度 | `build_parser`、`build_overrides`、`main` | 其余全部 |
 | `yolo_app/config.py` | 三层配置合并与默认值定义 | `DEFAULTS`、`load_config`、`deep_merge` | yaml |
 | `yolo_app/detector.py` | 模型加载、权重定位、类别名→id 解析、单帧推理/跟踪 | `Detector`、`resolve_weights`、`resolve_class_ids` | ultralytics |
-| `yolo_app/sources.py` | 统一视频源：文件/目录/摄像头/RTSP，断流重连 | `VideoSource`、`list_videos`、`is_camera` | OpenCV |
-| `yolo_app/analytics.py` | 业务后处理：ROI 多边形过滤、越线计数 | `RegionFilter`、`LineCounter`、`_inside`、`_side` | 无（纯几何） |
+| `yolo_app/sources.py` | 视频源门面：文件/目录/摄像头/RTSP 的 open/read/release | `VideoSource`、`list_videos`、`is_camera` | reader |
+| `yolo_app/reader.py` | 读取后端：OpenCV（文件/摄像头）与 FFmpeg 子进程（直播，有界队列+看门狗） | `OpenCVReader`、`FFmpegReader`、`probe_stream`、`choose_backend` | OpenCV、ffmpeg |
+| `yolo_app/analytics.py` | 业务后处理：ROI 过滤、越线计数、双阈值、静止降频、裁剪几何 | `RegionFilter`、`LineCounter`、`ConfFilter`、`StationaryGate`、`expand_box`、`remap_boxes` | 无（纯几何） |
+| `yolo_app/motion.py` | 运动门控：帧差判断有没有动，没动不推理 | `MotionGate`、`overlay_boxes` | OpenCV |
 | `yolo_app/outputs.py` | 结果落地：视频写入(含分段)、事件抓拍、JSON、留存清理 | `VideoSink`、`EventSink`、`cleanup_old`、`write_json` | OpenCV |
 | `yolo_app/alerts.py` | 告警通道：企业微信/飞书/通用 webhook | `AlertChannel` | urllib（标准库） |
 | `yolo_app/metrics.py` | Prometheus 文本指标生成 | `prometheus_text`、`write_metrics_file` | 无 |
@@ -44,19 +46,23 @@
 
 ## 一帧数据的完整链路
 
-1. **取帧** `sources.VideoSource.read()` —— 摄像头/RTSP 读失败按 `run.reconnect` 连续重试（成功一帧即清零计数），
-   直播源会设 `camera.buffer_size` 只保留最新帧。
+1. **取帧** `sources.VideoSource.read()` —— 由 `reader.py` 选后端：文件/摄像头走 OpenCV，直播源默认走
+   FFmpeg 子进程（`run.reader: auto`）；超时无帧判僵死并按 `run.reconnect` 重启，队列长度 `camera.buffer_size`。
 2. **跳帧判断** `pipeline.process` —— `run.stride` 命中则原样写帧（保持视频时长）并 continue。
-3. **推理/跟踪** `detector.Detector.infer()` —— `track.enable` 决定走 `model.track(persist=True)` 还是 `model.predict`。
-4. **ROI 过滤** `analytics.RegionFilter.keep()` —— 框中心落在多边形外则从结果里剔除（直接改 `res.boxes`，后续统计/绘制都只看到区域内目标）。
-5. **越线计数** `analytics.LineCounter.update()` —— 用 `track_id` 记住上一帧所在侧；目标需连续 `min_cross_frames` 帧
+3. **运动门控** `motion.MotionGate.update()` —— 帧差判断无运动则跳过推理（默认关闭，跳过时仍写盘与回调）。
+4. **推理/跟踪** `detector.Detector.infer()` —— `track.enable` 决定走 `model.track(persist=True)` 还是 `model.predict`；
+   开了 `analytics.roi_crop` 时先裁 ROI 再按小尺寸推理，`remap_boxes` 平移回原图。
+5. **ROI 过滤** `analytics.RegionFilter.keep()` —— 框中心落在多边形外则从结果里剔除（直接改 `res.boxes`，后续统计/绘制都只看到区域内目标）。
+6. **双阈值** `analytics.ConfFilter.keep()` —— 低于 `model.report_conf` 的框不进后续统计（但仍留给跟踪器维持轨迹）。
+7. **越线计数** `analytics.LineCounter.update()` —— 用 `track_id` 记住上一帧所在侧；目标需连续 `min_cross_frames` 帧
    落在新侧才记一次 in/out（抖动自动撤销），超过 `track_ttl` 帧未出现的 track 会被回收。
-6. **绘制** `res.plot()` + ROI 多边形 + 越线线（都是画在同一张 ndarray 上）。
-7. **事件抓拍** `outputs.EventSink.check()` —— 命中所配类别且置信度达标且过了冷却时间 → 存图 + 记事件。
-8. **告警** `alerts.AlertChannel` —— 抓拍与越线都会发一条文本；`alert.dedupe_s` 窗口内相同文本只发一次，失败只记日志。
-9. **写盘** `outputs.VideoSink.write()` —— 首帧才建 writer（兼容未知分辨率的直播源），H.264 优先，按 `segment_seconds` 切分。
-10. **回调** `on_frame` / `on_stats` —— Web 面板据此取最新画面与统计，本机跑时为空。
-11. **收尾** —— 无论正常结束、Ctrl-C 还是 `stop_event` 置位，都在 `finally` 里 release 源与写手（mp4 才有 moov），
+8. **静止降频**（默认关闭）—— `analytics.StationaryGate.should_infer()` 判定所有轨迹都不动时按 interval 抽帧。
+9. **绘制** `res.plot()` + ROI 多边形 + 越线线（都是画在同一张 ndarray 上）。
+10. **事件抓拍** `outputs.EventSink.check()` —— 命中所配类别且置信度达标且过了冷却时间 → 存图 + 记事件。
+11. **告警** `alerts.AlertChannel` —— 抓拍与越线都会发一条文本；`alert.dedupe_s` 窗口内相同文本只发一次，失败只记日志。
+12. **写盘** `outputs.VideoSink.write()` —— 首帧才建 writer（兼容未知分辨率的直播源），H.264 优先，按 `segment_seconds` 切分。
+13. **回调** `on_frame` / `on_stats` —— Web 面板据此取最新画面与统计，本机跑时为空。
+14. **收尾** —— 无论正常结束、Ctrl-C 还是 `stop_event` 置位，都在 `finally` 里 release 源与写手（mp4 才有 moov），
     再汇总统计写 `<源名>.json`；多源时另写 `summary_all.json`。
 
 ## 配置流
