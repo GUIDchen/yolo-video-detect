@@ -37,8 +37,10 @@ DEFAULTS = {
         'roi': [],             # [[x,y],...] 多边形，只统计区域内目标；空 = 不过滤
         'line': [],            # [[x1,y1],[x2,y2]] 越线，需配合 --track
         'classes': [],         # 参与越线计数的类别；空 = 全部
+        'anchor': 'center',    # 锚点：center=框中心（现有口径）；bottom=框底边中点（Frigate/supervision 通行做法）
+                               # 改成 bottom 会改变既有越线/ROI 口径，需重新标定
         'track_ttl': 300,      # 越线计数里 track 的存活帧数，超时即淘汰（防长视频内存增长）；0 = 不淘汰
-        'min_cross_frames': 2, # 越线防抖：连续 N 帧落在新的一侧才计一次穿越；1 = 不防抖
+        'min_cross_frames': 2, # 越线计数冷却帧数：同一 track 计数后 N 帧内再次相交不重复计数；1 = 不冷却
         'stationary_frames': 0,   # 静止降频：连续 N 帧几乎不动就开始抽帧推理；0 = 关闭（需开跟踪）
         'stationary_interval': 10,  # 静止后每多少帧推理一次
         'stationary_min_move': 2,   # 位移小于该像素数视为"没动"
