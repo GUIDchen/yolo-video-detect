@@ -54,17 +54,19 @@ def setUpModule():
 class FakeBoxes:
     """支持索引的最小 boxes 替身，用于不加载模型就测后处理。"""
 
-    def __init__(self, xyxy, cls, ids=None):
+    def __init__(self, xyxy, cls, ids=None, conf=None):
         self.xyxy = np.array(xyxy, dtype=float)
         self.cls = np.array(cls, dtype=float)
         self.id = None if ids is None else np.array(ids, dtype=float)
+        self.conf = None if conf is None else np.array(conf, dtype=float)
 
     def __len__(self):
         return len(self.cls)
 
     def __getitem__(self, i):
         return FakeBoxes(self.xyxy[i].tolist(), self.cls[i].tolist(),
-                         None if self.id is None else self.id[i].tolist())
+                         None if self.id is None else self.id[i].tolist(),
+                         None if self.conf is None else self.conf[i].tolist())
 
 
 class FakeRes:
@@ -501,6 +503,69 @@ class TestPipelineResilience(unittest.TestCase):
         out = Path(summary['output_video'])
         self.assertTrue(out.exists())
         out.unlink()
+
+
+class TestConfFilter(unittest.TestCase):
+    """双阈值：低分框只送跟踪，不进统计。"""
+
+    def _res(self, confs):
+        boxes = [[0, 0, 10, 10] for _ in confs]
+        return FakeRes(FakeBoxes(boxes, [0] * len(confs), conf=confs))
+
+    def test_filters_low_confidence(self):
+        from yolo_app.analytics import ConfFilter
+        f = ConfFilter(0.5)
+        out = f.keep(self._res([0.9, 0.2, 0.5]))
+        self.assertEqual(len(out.boxes), 2)                 # 0.5 边界算保留
+        self.assertEqual(f.dropped, 1)
+
+    def test_zero_means_disabled(self):
+        from yolo_app.analytics import ConfFilter
+        f = ConfFilter(0)
+        self.assertFalse(f.enabled)
+        self.assertEqual(len(f.keep(self._res([0.1])).boxes), 1)
+
+    def test_missing_conf_is_not_dropped(self):
+        from yolo_app.analytics import ConfFilter
+        f = ConfFilter(0.9)
+        out = f.keep(FakeRes(FakeBoxes([[0, 0, 1, 1]], [0])))   # 无 conf 属性
+        self.assertEqual(len(out.boxes), 1)
+        self.assertEqual(f.dropped, 0)
+
+
+class TestStationaryGate(unittest.TestCase):
+    """静止降频：目标不动时抽帧推理，一动就必须恢复逐帧。"""
+
+    def _res(self, cx, cy, tid=1):
+        return FakeRes(FakeBoxes([[cx - 5, cy - 5, cx + 5, cy + 5]], [0], [tid]))
+
+    def test_static_target_skips_frames(self):
+        from yolo_app.analytics import StationaryGate
+        gate = StationaryGate(frames=3, interval=5, min_move=2)
+        res = self._res(50, 50)
+        decisions = [gate.should_infer(res, f) for f in range(1, 21)]
+        self.assertTrue(all(decisions[:2]))                 # 先观察 2 帧
+        self.assertLessEqual(sum(decisions), 6)             # 20 帧里最多推理 6 次
+        self.assertGreaterEqual(gate.skipped, 10)
+
+    def test_moving_target_always_infers(self):
+        from yolo_app.analytics import StationaryGate
+        gate = StationaryGate(frames=2, interval=5, min_move=1)
+        for frame in range(1, 12):
+            self.assertTrue(gate.should_infer(self._res(50 + frame * 10, 50), frame))
+
+    def test_disabled_by_default(self):
+        from yolo_app.analytics import StationaryGate
+        gate = StationaryGate()
+        self.assertFalse(gate.enabled)
+        self.assertTrue(gate.should_infer(None, 1))
+
+
+class TestCliOverrides(unittest.TestCase):
+    def test_report_conf_flag(self):
+        from yolo_app.cli import build_overrides, build_parser
+        a = build_parser().parse_args(['check', '--report-conf', '0.6'])
+        self.assertEqual(build_overrides(a)['model']['report_conf'], 0.6)
 
 
 class TestWebApp(unittest.TestCase):

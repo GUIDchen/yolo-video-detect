@@ -165,3 +165,83 @@ class LineCounter:
 
     def summary(self):
         return {"line_total": dict(self.total), "line_by_class": {k: dict(v) for k, v in self.by_class.items()}}
+
+
+class ConfFilter:
+    """双阈值：只把置信度达标的结果交给统计/绘制，低分框仍留给跟踪器维持轨迹。
+
+    为什么要两个阈值：跟踪器需要"看得见"低分目标才不会断轨，而计数、抓拍、绘制
+    只需要高分目标。model.conf 管前者，model.report_conf 管后者（0 = 不额外过滤）。
+    """
+
+    def __init__(self, min_conf=0.0):
+        self.min_conf = float(min_conf or 0)
+        self.dropped = 0               # 累计被本类剔掉的框数（写进 summary.boxes_low_conf）
+
+    @property
+    def enabled(self):
+        return self.min_conf > 0
+
+    def keep(self, res):
+        """就地剔除低于 min_conf 的框，返回同一个 Results 供链式调用。"""
+        if not self.enabled or res.boxes is None or not len(res.boxes):
+            return res
+        conf = getattr(res.boxes, 'conf', None)
+        if conf is None:               # 没有置信度的结果（如撮合出来的 FakeBoxes）不误杀
+            return res
+        scores = conf.tolist() if hasattr(conf, 'tolist') else list(conf)
+        idx = [i for i, c in enumerate(scores) if float(c) >= self.min_conf]
+        if len(idx) != len(scores):
+            self.dropped += len(scores) - len(idx)
+            res.boxes = res.boxes[idx]
+        return res
+
+
+class StationaryGate:
+    """静止目标降频：所有活跃轨迹连续 N 帧几乎不动时，每 interval 帧才推理一次。
+
+    只对"开着跟踪"的场景有意义（没有 track_id 就无法判断谁静止）；默认关闭
+    （analytics.stationary_frames = 0），开启前建议先用真实视频确认轨迹不被打断。
+    """
+
+    def __init__(self, frames=0, interval=10, min_move=2.0):
+        self.frames = max(int(frames or 0), 0)
+        self.interval = max(int(interval or 1), 1)
+        self.min_move = float(min_move)
+        self._last = {}                # track_id -> (cx, cy)
+        self._still = {}               # track_id -> 连续静止帧数
+        self.skipped = 0
+
+    @property
+    def enabled(self):
+        return self.frames > 0
+
+    def should_infer(self, res, frame_no):
+        """根据上一帧结果决定本帧要不要推理；返回 True 表示需要推理。"""
+        if not self.enabled or res is None or res.boxes is None or not len(res.boxes):
+            self._last.clear()
+            self._still.clear()
+            return True
+        ids = getattr(res.boxes, 'id', None)
+        if ids is None:
+            return True
+        tids = ids.tolist() if hasattr(ids, 'tolist') else list(ids)
+        xyxy = res.boxes.xyxy.tolist()
+        if not tids:
+            return True
+        for tid, box in zip(tids, xyxy):
+            if tid is None:
+                return True            # 有框没 id，说明跟踪没收敛，照常推理
+            cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+            prev = self._last.get(tid)
+            moved = 0.0 if prev is None else ((cx - prev[0]) ** 2 + (cy - prev[1]) ** 2) ** 0.5
+            self._last[tid] = (cx, cy)
+            if moved <= self.min_move:
+                self._still[tid] = self._still.get(tid, 0) + 1
+            else:
+                self._still[tid] = 0
+        quiet = all(self._still.get(t, 0) >= self.frames for t in tids)
+        if not quiet or int(frame_no) % self.interval == 0:
+            return True
+        self.skipped += 1
+        return False

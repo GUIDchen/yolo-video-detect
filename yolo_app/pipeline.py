@@ -15,7 +15,7 @@ from pathlib import Path
 import cv2
 
 from .alerts import AlertChannel
-from .analytics import LineCounter, RegionFilter
+from .analytics import ConfFilter, LineCounter, RegionFilter, StationaryGate
 from .detector import resolve_class_ids
 from .outputs import EventSink, VideoSink, write_json
 from .sources import VideoSource, is_camera
@@ -66,12 +66,26 @@ def process(source, cfg, detector, logger, show=None, record=None, on_stats=None
         raise RuntimeError(f'无法打开视频源: {source}{hint}')
 
     video_path = output_paths(cfg, source)
-    sink = events = roi = line = alert = None
+    sink = events = roi = line = alert = conf = None
+    stationary = StationaryGate(0)          # 未启用时当作"永远需要推理"
     hits, ids, crossings = Counter(), set(), []
-    idx = done = skipped = 0
+    idx = done = skipped = skip_stationary = skip_motion = 0
     interrupted = False
+    last_res = None
     t0 = time.time()
     infer_total = infer_max = 0.0
+
+    def emit_stats():
+        """把当前统计推给面板；跳帧/跳过推理的分支也要调用，否则前端 FPS 会僵住。"""
+        if not on_stats:
+            return
+        el = max(time.time() - t0, 1e-6)
+        on_stats({'frames': done, 'skipped': skipped, 'fps': round(done / el, 1),
+                  'infer_ms_avg': round(infer_total / done, 2) if done else 0,
+                  'infer_ms_max': round(infer_max, 2),
+                  'skipped_stationary': skip_stationary, 'skipped_motion': skip_motion,
+                  'per_class': dict(hits), 'unique_tracks': len(ids),
+                  'line': dict(line.total), 'events': len(events.events) if events else 0})
 
     try:
         # 2) 业务组件：录像、抓拍、ROI、越线、告警
@@ -82,6 +96,11 @@ def process(source, cfg, detector, logger, show=None, record=None, on_stats=None
                             ev_cfg['min_conf'], ev_cfg['cooldown_s']) if ev_cfg['enable'] else None)
         a_cfg = cfg.get('analytics', {})
         roi = RegionFilter(a_cfg.get('roi'))
+        conf = ConfFilter(cfg['model'].get('report_conf') or 0)
+        if detector.track:                  # 静止降频依赖 track_id，没开跟踪就没有意义
+            stationary = StationaryGate(a_cfg.get('stationary_frames', 0),
+                                        a_cfg.get('stationary_interval', 10),
+                                        a_cfg.get('stationary_min_move', 2))
         line = LineCounter(a_cfg.get('line'), resolve_class_ids(a_cfg.get('classes'), detector.names),
                            detector.names, track_ttl=a_cfg.get('track_ttl', 300),
                            min_cross_frames=a_cfg.get('min_cross_frames', 2))
@@ -93,6 +112,8 @@ def process(source, cfg, detector, logger, show=None, record=None, on_stats=None
                     f'{int(src.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))} @{src.fps:.0f}fps | 设备 {detector.device_name}'
                     f'{" | 跟踪 " + cfg["track"]["tracker"] if detector.track else ""}'
                     f'{" | ROI" if roi.enabled else ""}{" | 越线计数" if line.enabled else ""}'
+                    f'{" | 双阈值 " + str(conf.min_conf) if conf.enabled else ""}'
+                    f'{" | 静止降频 " + str(stationary.interval) + "帧" if stationary.enabled else ""}'
                     f'{" | 告警已启用" if alert.enabled else ""}')
 
         while True:
@@ -113,9 +134,20 @@ def process(source, cfg, detector, logger, show=None, record=None, on_stats=None
                     sink.write(frame)           # 跳过的帧原样写出，保持时长一致
                 continue
 
+            # 静止降频：有跟踪且所有目标都不动时，按 interval 抽帧推理（默认关闭）
+            if stationary.enabled and not stationary.should_infer(last_res, idx):
+                skip_stationary += 1
+                if sink:
+                    sink.write(frame)
+                if on_frame:
+                    on_frame(frame)
+                emit_stats()
+                continue
+
             # 4) 推理（可选跟踪）→ 5) ROI 过滤：区域外的框直接剔除，后续统计/绘制都看不到
             t_infer = time.perf_counter()
-            res = roi.keep(detector.infer(frame))
+            res = conf.keep(roi.keep(detector.infer(frame)))    # 先 ROI 后置信度：ROI 更便宜
+            last_res = res
             cost_ms = (time.perf_counter() - t_infer) * 1000
             infer_total += cost_ms
             infer_max = max(infer_max, cost_ms)
@@ -148,12 +180,7 @@ def process(source, cfg, detector, logger, show=None, record=None, on_stats=None
                     break
             if on_frame:
                 on_frame(anno)
-            if on_stats:
-                el = max(time.time() - t0, 1e-6)
-                on_stats({'frames': done, 'skipped': skipped, 'fps': round(done / el, 1),
-                          'infer_ms_avg': round(infer_total / done, 2), 'infer_ms_max': round(infer_max, 2),
-                          'per_class': dict(hits), 'unique_tracks': len(ids),
-                          'line': dict(line.total), 'events': len(events.events) if events else 0})
+            emit_stats()
             if done % max(cfg['log']['interval'], 1) == 0:
                 el = time.time() - t0 or 1e-6
                 logger.info(f'帧 {idx}/{src.total or "-"} | {done / el:.1f} FPS | {dict(hits)}')
@@ -172,6 +199,9 @@ def process(source, cfg, detector, logger, show=None, record=None, on_stats=None
     summary = {
         'source': str(source), 'model': detector.weights,
         'frames_src': idx, 'frames_inferred': done, 'frames_skipped': skipped,
+        'frames_inference_skipped': skip_stationary + skip_motion,
+        'skip_reasons': {'stationary': skip_stationary, 'motion': skip_motion},
+        'boxes_low_conf': conf.dropped if conf else 0,
         'elapsed_s': round(el, 1), 'avg_fps': round(done / el, 1),
         'infer_fps': round(done / infer_s, 1) if infer_s else 0,
         'infer_ms_avg': round(infer_total / done, 2) if done else 0,

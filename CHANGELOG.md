@@ -1,5 +1,15 @@
 # 变更记录
 
+## 未发布 — v0.6.0（P1 优化）
+
+### 新增
+- **双阈值**：`model.report_conf`（CLI `--report-conf`）。低于该值的框只送跟踪器、不进统计/绘制/抓拍/越线，
+  跟踪阈值仍是 `model.conf`，轨迹不会因为提高显示阈值而断。
+- **静止降频**：`analytics.stationary_frames / stationary_interval / stationary_min_move`（默认关闭）。
+  开着跟踪时，所有轨迹连续 N 帧几乎不动就按 interval 抽帧推理；实测静态视频推理帧数 75 → 10。
+- summary 新增 `frames_inference_skipped`、`skip_reasons`、`boxes_low_conf`；
+  指标新增 `yolo_inference_skipped_total{reason="stationary"|"motion"}`。
+
 ## v0.5.0 — 健壮性与可观测性（对照 Frigate/supervision 的差距分析）
 
 ### 修复（会直接造成线上事故的路径）

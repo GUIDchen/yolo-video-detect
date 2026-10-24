@@ -58,6 +58,8 @@ def add_common(p):
     p.add_argument('--imgsz', type=int, help='推理分辨率，320 更快 / 1280 更准')
     p.add_argument('--conf', type=float, help='置信度阈值')
     p.add_argument('--iou', type=float, help='NMS IoU 阈值')
+    p.add_argument('--report-conf', dest='report_conf', type=float,
+                   help='双阈值：低于该值的框只送跟踪，不进统计/绘制/抓拍（默认沿用 --conf）')
     p.add_argument('--device', help='cpu / 0 / 0,1，默认自动')
     p.add_argument('--classes', help='类别 id 或名称，逗号分隔，如 person,bus 或 0,2')
     p.add_argument('--track', dest='track', action='store_true', default=None, help='启用 ByteTrack 跟踪')
@@ -91,6 +93,7 @@ def build_overrides(a):
         (getattr(a, 'imgsz', None), m, 'imgsz'),
         (getattr(a, 'conf', None), m, 'conf'),
         (getattr(a, 'iou', None), m, 'iou'),
+        (getattr(a, 'report_conf', None), m, 'report_conf'),
         (getattr(a, 'device', None), m, 'device'),
         (getattr(a, 'stride', None), run, 'stride'),
         (getattr(a, 'max_frames', None), run, 'max_frames'),

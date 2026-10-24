@@ -8,6 +8,7 @@ model:
   half: false              # FP16，仅 CUDA
   augment: false           # TTA 测试时增强：更准但约 2 倍耗时
   classes: []              # 例: [0] 只检测人; [person, bus] 也支持
+  report_conf: 0           # 双阈值：低于该值的框只送跟踪，不进统计/绘制/抓拍；0 = 沿用 conf
 
 track:
   enable: false            # true = ByteTrack，输出 track_id 与唯一目标数
@@ -37,6 +38,9 @@ analytics:
   classes: []              # 参与越线计数的类别；空 = 全部
   track_ttl: 300           # 越线计数里 track 状态保留帧数，超时淘汰（长视频防内存增长）；0 = 不淘汰
   min_cross_frames: 2      # 越线防抖：连续 N 帧在新侧才计一次；1 = 单帧即判定（易被抖动刷计数）
+  stationary_frames: 0     # 静止降频：连续 N 帧几乎不动则抽帧推理；0 = 关闭（需开 --track）
+  stationary_interval: 10  # 静止状态下每多少帧推理一次
+  stationary_min_move: 2   # 位移小于该像素数视为没动
 
 alert:
   webhook: ''              # 企业微信/飞书机器人 key，或任意接收 JSON 的 URL

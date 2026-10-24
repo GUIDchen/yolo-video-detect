@@ -24,6 +24,7 @@ DEFAULTS = {
         'half': False,         # FP16，仅 CUDA
         'augment': False,      # TTA 测试时增强：更准但约 2 倍耗时
         'classes': [],         # 类别 id 或名称；空 = 全部
+        'report_conf': 0,      # 双阈值：低于该值的框只送跟踪、不进统计/绘制/抓拍；0 = 沿用 conf
     },
     'track': {'enable': False, 'tracker': 'bytetrack.yaml'},
     'run': {'stride': 1, 'max_frames': 0, 'reconnect': 3, 'retry_delay': 1.0,
@@ -36,6 +37,9 @@ DEFAULTS = {
         'classes': [],         # 参与越线计数的类别；空 = 全部
         'track_ttl': 300,      # 越线计数里 track 的存活帧数，超时即淘汰（防长视频内存增长）；0 = 不淘汰
         'min_cross_frames': 2, # 越线防抖：连续 N 帧落在新的一侧才计一次穿越；1 = 不防抖
+        'stationary_frames': 0,   # 静止降频：连续 N 帧几乎不动就开始抽帧推理；0 = 关闭（需开跟踪）
+        'stationary_interval': 10,  # 静止后每多少帧推理一次
+        'stationary_min_move': 2,   # 位移小于该像素数视为"没动"
     },
     'alert': {'webhook': '', 'type': 'generic', 'timeout': 5, 'dedupe_s': 3.0},
     'serve': {'host': '127.0.0.1', 'port': 8000, 'source': '0', 'quality': 80, 'token': ''},
