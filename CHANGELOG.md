@@ -1,5 +1,34 @@
 # 变更记录
 
+## v0.7.0 — P2 工程化（事件落库 / 告警 outbox / 配置校验 / 锚点 / 面板增量）
+
+### 新增
+- **事件落库（`yolo_app/store.py`）**：SQLite + WAL 的 `EventStore`，events 表记录每条越线/抓拍事件，
+  outbox 表记录待发告警；`claim_due` 用 `BEGIN IMMEDIATE` 原子认领，多进程共享同一库也不会重复发送。
+- **告警 outbox 重试**：发送失败按 `base_delay * 2^(n-1)` 退避，超过 `alert.retry.max_attempts` 置 dead；
+  `alert.dedupe_s` 在入队前去重，重试不会被去重吞掉。`output.events.db = ''` 时不建库，退回旧的同步发送。
+- **EventSink 异步写盘**：抓拍图交给单线程 + 有界队列（`output.events.async_queue`，默认 64，满则丢最旧并计数），
+  主循环不再被 `imwrite` 阻塞；events 列表仍在调用线程同步维护，summary 立刻可用。
+- **面板 WebSocket 增量推送**：统计带单调 `seq`；`/ws?since=<seq>` 只在 seq 变化时推送，空闲 15s 心跳；
+  前端按 seq 去重、断线 3s 后带 since 重连。`/stats` 同步增加 `seq`。
+- **越线改线段相交判定**：用上一帧锚点 → 当前锚点的线段与计数线求交（叉积法，含端点接触与共线重叠），
+  一帧内大跨度跨越不再漏计；`min_cross_frames` 语义改为同一 track 的计数冷却帧数。
+- **锚点可配置**：`analytics.anchor: center | bottom`（默认 center）。bottom = 框底边中点，
+  与 Frigate / supervision / DeepStream 口径一致；切换会改变既有 ROI/越线口径，需重新标定。
+- **配置 schema 校验**：`validate_config()` 在启动时检查类型与取值范围，错误信息带字段、当前值、期望；
+  YAML 里的未知键以 warning 形式提示（`strict=True` 时抛错），CLI 校验失败返回 1 而不是抛栈。
+- **输出命名去重**：`--name-mode unique`（或 `output.name_mode`）给结果名加源路径哈希，避免同名视频互相覆盖；
+  目录批量且源 > 1 时自动启用。
+
+### 变更
+- 版本号 0.6.0 → 0.7.0；测试 61 → **128**（新增 store/outbox/异步写盘/WS 协议/锚点/配置校验/命名共 67 条）。
+- `docs/CODE_WALKTHROUGH.md` 补写 `reader.py` 与 `motion.py` 两章（逐行 + 常见坑）。
+
+### 验证
+- `make test` 128 个用例全绿，`ruff` 通过。
+- 端到端：越线事件落库 7 条、outbox 0 滞留；`--name-mode unique` 两次调用文件名稳定（`test_e32d8f.mp4`）；
+  `anchor: bottom` 下越线计 1；`/stats` 返回 `seq`。
+
 ## v0.6.0 — P1 优化（读取层 / 运动门控 / 双阈值 / ROI 裁剪）
 
 ### 新增

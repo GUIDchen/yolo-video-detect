@@ -127,10 +127,20 @@ Gauge 不能用 `set_function`，见 [client_python 多进程文档](https://pro
 遗留风险（记录在案，不阻塞）：FFmpeg 后端在**文件**上比 OpenCV 多一层管道与色彩转换开销，
 因此 `auto` 只给直播源启用 FFmpeg；ROI 裁剪不支持分割/姿态（遇到时自动退回全图并告警）。
 
-### 5.3 P2（记录，不承诺时间）
+### 5.3 P2（v0.7.0 已实施）
 
-事件表落库（SQLite）+ 告警 outbox 重试、ROI 裁剪与线段相交判定、bottom-center 锚点（需迁移说明）、
-配置 schema 校验、输出命名去重、WebSocket 增量推送、EventSink 异步写盘。
+| 项 | 实现 | 验证 |
+| --- | --- | --- |
+| 事件落库 + 告警 outbox 重试 | `yolo_app/store.py`（SQLite/WAL，`BEGIN IMMEDIATE` 原子认领，指数退避，超限 dead） | `tests/test_events.py` 17 例；端到端 7 条事件落库 |
+| EventSink 异步写盘 | 单线程 + 有界队列（默认 64），满则丢最旧并计数，close/flush 排空 | `test_events.py` 队列与 flush 用例 |
+| 越线改线段相交 | `_segments_intersect`（叉积，含端点/共线），一帧大跨度不漏计；`min_cross_frames` 改为冷却帧数 | `tests/test_anchors.py` 18 例 |
+| bottom-center 锚点 | `analytics.anchor: center\|bottom`，RegionFilter 与 LineCounter 共用 | 同上，含 pipeline 接线回归用例 |
+| 配置 schema 校验 | `ConfigError` + `validate_config()`，未知键 warning、strict 抛错、CLI 返回 1 | `tests/test_config_schema.py` 12 例 |
+| 输出命名去重 | `--name-mode unique`（源路径 sha1 前 6 位），批量 >1 源自动启用 | `tests/test_output_naming.py` 12 例 |
+| WebSocket 增量推送 | `seq` 版本号 + `?since=` + 15s 心跳 + 前端 3s 重连去重 | `tests/test_webapp_api.py` 6 例 |
+
+仍留在 P2 的尾巴：outbox 里 `sending` 状态的崩溃回收、events/sent 行的保留期清理、
+递归目录批量（当前 `list_videos` 只扫一层，所以"不同子目录同名"要手动 `--source` 多次才会遇到）。
 
 ---
 
@@ -163,7 +173,7 @@ Gauge 不能用 `set_function`，见 [client_python 多进程文档](https://pro
 
 ```text
 $ make test
-Ran 61 tests ... OK            # v0.5.0: 34 → v0.6.0: 61（+27 条 P1 用例）
+Ran 128 tests ... OK           # v0.6.0: 61 → v0.7.0: 128（+67 条 P2 用例）
 
 $ make lint
 All checks passed!

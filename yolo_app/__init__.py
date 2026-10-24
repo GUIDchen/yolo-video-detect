@@ -17,4 +17,4 @@
 扩展原则：加输入改 sources，加后处理改 analytics + pipeline 里一行，加输出改 outputs，
          加接口改 webapp，别在 pipeline 里堆业务分支。
 """
-__version__ = '0.6.0'
+__version__ = '0.7.0'

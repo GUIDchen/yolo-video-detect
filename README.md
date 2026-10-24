@@ -22,6 +22,10 @@
 | Web 面板（MJPEG + WebSocket + Prometheus） | `python -m yolo_app serve` |
 | 面板鉴权 / 健康检查 / 优雅停机 | `serve --token` · `/healthz` · SIGTERM 自动收尾 |
 | 越线防抖 + 轨迹回收 | `analytics.min_cross_frames` / `analytics.track_ttl` |
+| 事件落库 + 告警重试队列（SQLite） | `output.events.db` / `alert.retry.*` |
+| 配置校验 / 输出唯一命名 | `validate_config()` · `--name-mode unique` |
+| 面板统计增量推送（seq + 心跳 + 重连） | `/ws?since=<seq>` · `/stats` |
+| 越线线段相交判定 + bottom 锚点 | `analytics.anchor: bottom` |
 | 双阈值（低分框只送跟踪） | `--report-conf 0.5` |
 | 运动门控（没动不推理） | `motion.enable: true` |
 | ROI 裁剪推理（快 1.8×） | `analytics.roi_crop: true` + `roi_imgsz: 320` |
@@ -173,6 +177,7 @@ $ python -m yolo_app run --source data/test.mp4 --track --max-frames 5 --out-dir
 | `--workers` | 目录批量的并行进程数 |
 | `--token` | `serve` 面板访问 token；设置后 /stats /metrics /stream /ws 需带 `?token=` |
 | `--report-conf` | 双阈值：低于该值的框只送跟踪，不进统计/绘制/抓拍（默认沿用 `--conf`） |
+| `--name-mode` | `stem`（默认）或 `unique`（结果名带源路径哈希，避免同名视频互相覆盖） |
 
 ## 业务后处理：ROI 与越线计数
 
@@ -375,7 +380,7 @@ docker build --build-arg BASE=docker.m.daocloud.io/library/python:3.12-slim \
 ## 测试与 CI
 
 ```bash
-.venv/bin/python -m unittest discover -s tests -v     # 34 个用例
+.venv/bin/python -m unittest discover -s tests -v     # 128 个用例
 ruff check yolo_app tests scripts                    # 代码检查
 ```
 
@@ -404,7 +409,7 @@ make install-wheel                            # 切回官方 wheel 基线（ultr
 
 ```
 $ python -m unittest discover -s tests
-Ran 61 tests ... OK
+Ran 128 tests ... OK
 $ ruff check yolo_app tests scripts
 All checks passed!
 

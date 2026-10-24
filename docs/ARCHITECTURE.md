@@ -31,14 +31,15 @@
 | --- | --- | --- | --- |
 | `yolo_app/__main__.py` | 让 `python -m yolo_app` 可用 | `main()` | cli |
 | `yolo_app/cli.py` | 命令行入口、参数解析、子命令分发、多进程调度 | `build_parser`、`build_overrides`、`main` | 其余全部 |
-| `yolo_app/config.py` | 三层配置合并与默认值定义 | `DEFAULTS`、`load_config`、`deep_merge` | yaml |
+| `yolo_app/config.py` | 三层配置合并、默认值、schema 校验 | `DEFAULTS`、`load_config`、`deep_merge`、`validate_config` | yaml |
 | `yolo_app/detector.py` | 模型加载、权重定位、类别名→id 解析、单帧推理/跟踪 | `Detector`、`resolve_weights`、`resolve_class_ids` | ultralytics |
 | `yolo_app/sources.py` | 视频源门面：文件/目录/摄像头/RTSP 的 open/read/release | `VideoSource`、`list_videos`、`is_camera` | reader |
 | `yolo_app/reader.py` | 读取后端：OpenCV（文件/摄像头）与 FFmpeg 子进程（直播，有界队列+看门狗） | `OpenCVReader`、`FFmpegReader`、`probe_stream`、`choose_backend` | OpenCV、ffmpeg |
 | `yolo_app/analytics.py` | 业务后处理：ROI 过滤、越线计数、双阈值、静止降频、裁剪几何 | `RegionFilter`、`LineCounter`、`ConfFilter`、`StationaryGate`、`expand_box`、`remap_boxes` | 无（纯几何） |
 | `yolo_app/motion.py` | 运动门控：帧差判断有没有动，没动不推理 | `MotionGate`、`overlay_boxes` | OpenCV |
 | `yolo_app/outputs.py` | 结果落地：视频写入(含分段)、事件抓拍、JSON、留存清理 | `VideoSink`、`EventSink`、`cleanup_old`、`write_json` | OpenCV |
-| `yolo_app/alerts.py` | 告警通道：企业微信/飞书/通用 webhook | `AlertChannel` | urllib（标准库） |
+| `yolo_app/alerts.py` | 告警通道：企业微信/飞书/通用 webhook、outbox 重试 | `AlertChannel`、`drain_outbox` | urllib（标准库） |
+| `yolo_app/store.py` | 事件与告警 outbox 持久化（SQLite + WAL） | `EventStore` | sqlite3 |
 | `yolo_app/metrics.py` | Prometheus 文本指标生成 | `prometheus_text`、`write_metrics_file` | 无 |
 | `yolo_app/pipeline.py` | **核心主循环**，串起上面所有模块；多进程 worker 入口 | `process`、`run_job`、`output_paths` | 上面全部 |
 | `yolo_app/webapp.py` | FastAPI 面板：MJPEG/WebSocket/指标/统计接口 | `create_app`、`serve` | fastapi、uvicorn |
