@@ -8,9 +8,16 @@
     GET  /         面板页（内嵌 HTML，实时画面 + 统计表）
     GET  /healthz  健康检查（供 Docker HEALTHCHECK / k8s liveness 用，加载的是内存状态，毫秒级）
     GET  /stream   MJPEG 流（multipart/x-mixed-replace），可直接嵌到别的前端
-    GET  /stats    当前统计 JSON
-    WS   /ws       每秒推送一次统计（前端表格就是靠它刷新的）
+    GET  /stats    当前统计 JSON（带 seq 版本号）
+    WS   /ws       统计增量推送：先发当前快照，之后 seq 变化才推，空闲每 15s 一条心跳
     GET  /metrics  Prometheus 文本指标
+
+WS 消息协议（seq 是统计版本号，AppState 每收到一次 on_stats 就 +1）：
+    {"type": "stats", "seq": n, "source": "...", "finished": false, "error": null, ...stats}
+    {"type": "heartbeat", "seq": n}
+断线重连用 ?since=<int> 告诉服务端"客户端已看到第几版"；服务端仍会先补一条当前快照，
+避免客户端在没有新统计时首屏空白——真正的增量体现在"seq 不变不重推"，重复帧由客户端
+按 seq 去重。心跳间隔默认 15s（serve.ws_heartbeat 可调，主要给测试用）。
 
 鉴权：配置 serve.token 非空时，/stats /metrics /stream /ws 需要 `?token=xxx` 或 `X-Token` 头；
 / 与 /healthz 不鉴权（前者只是静态页，后者不含业务数据）。
@@ -53,15 +60,40 @@ const q = token ? ('?token=' + encodeURIComponent(token)) : '';
 $('#stream').src = '/stream' + q;
 $('#metrics').href = '/metrics' + q;
 $('#stats').href = '/stats' + q;
-const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws' + q);
-ws.onmessage = (e) => {
-  const d = JSON.parse(e.data);
+let lastSeq = -1;                 // 已渲染的统计版本号：相同 seq 不重绘
+let ws = null, retry = null;
+
+function render(d) {
   $('#fps').textContent = (d.fps || 0) + ' FPS';
   const rows = [['帧数', d.frames], ['FPS', d.fps], ['推理 ms/帧', d.infer_ms_avg], ['唯一目标', d.unique_tracks],
                 ['告警抓拍', d.events], ['越线 in', (d.line || {}).in], ['越线 out', (d.line || {}).out]];
   for (const [k, v] of Object.entries(d.per_class || {})) rows.push(['检测 · ' + k, v]);
   $('#tbl').innerHTML = '<tbody>' + rows.map(r => '<tr><td class="k">' + r[0] + '</td><td class="v">' + (r[1] ?? 0) + '</td></tr>').join('') + '</tbody>';
-};
+}
+
+function connect() {
+  clearTimeout(retry);
+  const p = new URLSearchParams(location.search);          // 带上面板 URL 里的 token
+  if (lastSeq >= 0) p.set('since', lastSeq);               // 断线重连：告诉服务端已看到哪一版
+  const qs = p.toString();
+  const sock = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws' + (qs ? '?' + qs : ''));
+  ws = sock;
+  sock.onmessage = (e) => {
+    if (sock !== ws) return;                               // 旧连接迟到的事件直接丢弃
+    const d = JSON.parse(e.data);
+    if (d.seq === lastSeq) return;                         // 同一 seq = 内容没变，不重绘
+    lastSeq = d.seq;
+    if (d.type === 'heartbeat') return;                    // 心跳只保活，不渲染
+    render(d);
+  };
+  sock.onclose = () => {                                   // 3 秒后带 since 重连；MJPEG 是独立 <img>，不受影响
+    if (sock !== ws) return;
+    ws = null;
+    retry = setTimeout(connect, 3000);
+  };
+  sock.onerror = () => sock.close();                       // 部分浏览器 onerror 后不触发 onclose，兜底
+}
+connect();
 </script></body></html>"""
 
 
@@ -72,11 +104,34 @@ class AppState:
         self.lock = threading.Lock()
         self.jpeg = None
         self.stats = {}
+        self.seq = 0                # 统计版本号：每次 update_stats +1，WS 靠它判断"有没有新内容"
         self.error = None
         self.finished = False
         self.started = time.time()
         self.stop = threading.Event()
         self.thread = None
+
+    def update_stats(self, stats):
+        """写入新统计并推进版本号；两者在同一把锁里更新，保证 seq 与 stats 永远对应同一版。"""
+        with self.lock:
+            self.stats = stats
+            self.seq += 1
+
+    def snapshot(self):
+        """锁内取一份可直接序列化的快照：seq + 运行状态 + 统计。
+
+        HTTP /stats 与 WS 推送都走这里，避免读到"seq 已经变了、stats 还没换"的中间态。
+        """
+        with self.lock:
+            return {'seq': self.seq, 'finished': self.finished, 'error': self.error, **self.stats}
+
+
+def _parse_since(raw):
+    """解析 WS 的 ?since=<int>；缺省/非法返回 None（按全新连接处理，坏参数不该让面板连不上）。"""
+    try:
+        return int(raw) if raw not in (None, '') else None
+    except (TypeError, ValueError):
+        return None
 
 
 def create_app(cfg, detector, logger, source):
@@ -88,6 +143,9 @@ def create_app(cfg, detector, logger, source):
     st = AppState()
     quality = int(cfg.get('serve', {}).get('quality', 80) or 80)
     token = str(cfg.get('serve', {}).get('token') or '')
+    # 空闲心跳间隔：默认 15s；测试会调到亚秒级，才能在小窗口里验证"不重复推同 seq"
+    heartbeat = max(0.05, float(cfg.get('serve', {}).get('ws_heartbeat', 15) or 15))
+    tick = min(1.0, heartbeat)          # 统计轮询 1s；心跳更短时跟着缩短，保证心跳准时
     record = cfg['output']['video']
 
     def _authorized(request) -> bool:
@@ -103,8 +161,7 @@ def create_app(cfg, detector, logger, source):
                 st.jpeg = buf.tobytes()
 
     def on_stats(s):
-        with st.lock:
-            st.stats = s
+        st.update_stats(s)
         if cfg.get('metrics', {}).get('file'):
             write_metrics_file(cfg['metrics']['file'], s)
 
@@ -155,9 +212,7 @@ def create_app(cfg, detector, logger, source):
     def stats(request: Request):
         if not _authorized(request):
             raise HTTPException(status_code=401, detail='token 无效')
-        with st.lock:
-            return JSONResponse({'source': str(source), 'finished': st.finished,
-                                 'error': st.error, **st.stats})
+        return JSONResponse({'source': str(source), **st.snapshot()})
 
     @app.get('/metrics', response_class=PlainTextResponse)
     def metrics(request: Request):
@@ -189,13 +244,24 @@ def create_app(cfg, detector, logger, source):
         if token and (sock.query_params.get('token') or sock.headers.get('x-token')) != token:
             await sock.close(code=1008)              # 1008 = policy violation
             return
+        since = _parse_since(sock.query_params.get('since'))
         await sock.accept()
         try:
+            # 首条始终补当前快照：客户端无需等下一次统计更新就能画出首屏（since 只是提示，不阻塞首帧）
+            snap = st.snapshot()
+            last_seq, last_sent = snap['seq'], time.monotonic()
+            if since is not None:
+                logger.debug(f'WS 重连: 客户端 since={since}, 服务端 seq={last_seq}')
+            await sock.send_json({'type': 'stats', 'source': str(source), **snap})
             while True:
-                with st.lock:
-                    payload = {'source': str(source), 'finished': st.finished, **st.stats}
-                await sock.send_json(payload)
-                await asyncio.sleep(1)
+                await asyncio.sleep(tick)
+                snap = st.snapshot()
+                if snap['seq'] != last_seq:          # 只有统计真的变过才推全量快照
+                    last_seq, last_sent = snap['seq'], time.monotonic()
+                    await sock.send_json({'type': 'stats', 'source': str(source), **snap})
+                elif time.monotonic() - last_sent >= heartbeat:
+                    last_sent = time.monotonic()     # 长时间无更新发心跳，客户端据此判断链路存活
+                    await sock.send_json({'type': 'heartbeat', 'seq': snap['seq']})
         except WebSocketDisconnect:
             return
 
